@@ -13,6 +13,7 @@
 #include "ttmlir/Dialect/TTNN/IR/TTNNOps.h"
 #include "ttmlir/Dialect/TTNN/IR/TTNNOpsAttrs.h"
 #include "ttmlir/Dialect/TTNN/Transforms/GreedyMemoryLayoutPropagation.h"
+#include "ttmlir/Dialect/TTNN/Transforms/ViterbiOptimizer.h"
 #include "ttmlir/Dialect/TTNN/Utils/CompositeResolution.h"
 #include "ttmlir/Dialect/TTNN/Utils/OptimizerOverrides.h"
 #include "ttmlir/Dialect/TTNN/Utils/PassOptionParsers.h"

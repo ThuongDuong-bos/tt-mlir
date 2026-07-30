@@ -41,6 +41,7 @@ enum class LogComponent {
   D2MFusion,
   IsolatedIRValidationWrapper,
   GreedyOptimizer,
+  ViterbiOptimizer,
   PerfTargets
 };
 
@@ -74,6 +75,8 @@ inline constexpr const char *getLogComponentStr(LogComponent type) {
     return "isolated-ir-validation-wrapper";
   case LogComponent::GreedyOptimizer:
     return "greedy-optimizer";
+  case LogComponent::ViterbiOptimizer:
+    return "viterbi-optimizer";
   case LogComponent::PerfTargets:
     return "perf-targets";
   }
