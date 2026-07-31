@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: (c) 2024 BOS Semiconductors
+// SPDX-FileCopyrightText: (c) 2026 BOS Semiconductors
 //
 // SPDX-License-Identifier: Apache-2.0
 
