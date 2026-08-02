@@ -64,6 +64,13 @@ struct TTIRToTTNNCommonPipelineOptions
       llvm::cl::desc("Determine and set max valid grid for Op execution."),
       llvm::cl::init(false)};
 
+	// Enable the viterbi optimizer instead of the greedy optimizer.
+	Option<bool> enableViterbiOptimizer{
+			*this, "enable-viterbi-optimizer",
+			llvm::cl::desc(
+					"Use the Viterbi optimizer instead of the greedy optimizer."),
+			llvm::cl::init(false)};
+
   // If this option is true, run a pass that checks if all ops relevant
   // to the optimizer (e.g. toLayout is ignored) have unique named locations.
   // If not, it will emit an error. This is necessary for the overrides to be

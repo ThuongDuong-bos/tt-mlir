@@ -116,45 +116,66 @@ void createTTNNPipelineAnalysisPasses(
     ttnn::TTNNOperationValidationAndFallbackOptions validationOptions;
     validationOptions.maxFallbackAttempts = options.maxFallbackAttempts;
 
-    // Greedy optimizer: memory layout propagation + L1 spill management.
-    TTNNGreedyMemoryLayoutPropagationPipelineOptions propagationOptions;
-    propagationOptions.maxLegalLayouts = options.maxLegalLayouts;
-    propagationOptions.rowMajorEnabled = options.rowMajorEnabled;
-    propagationOptions.enableL1ShardingLayouts =
-        options.memoryLayoutAnalysisEnabled;
-    propagationOptions.overrideOutputLayout = options.overrideOutputLayout;
-    propagationOptions.overrideConv2dConfig = options.overrideConv2dConfig;
-    propagationOptions.overrideConv3dConfig = options.overrideConv3dConfig;
-    propagationOptions.enableDecisionTrace = options.enableDecisionTrace;
-    propagationOptions.decisionTraceDir = options.decisionTraceDir;
-    propagationOptions.enableCompileTimeStats = options.enableCompileTimeStats;
+    if (!options.enableViterbiOptimizer) {
+      // Greedy optimizer: memory layout propagation + L1 spill management.
+      TTNNGreedyMemoryLayoutPropagationPipelineOptions propagationOptions;
+      propagationOptions.maxLegalLayouts = options.maxLegalLayouts;
+      propagationOptions.rowMajorEnabled = options.rowMajorEnabled;
+      propagationOptions.enableL1ShardingLayouts =
+          options.memoryLayoutAnalysisEnabled;
+      propagationOptions.overrideOutputLayout = options.overrideOutputLayout;
+      propagationOptions.overrideConv2dConfig = options.overrideConv2dConfig;
+      propagationOptions.overrideConv3dConfig = options.overrideConv3dConfig;
+      propagationOptions.enableDecisionTrace = options.enableDecisionTrace;
+      propagationOptions.decisionTraceDir = options.decisionTraceDir;
+      propagationOptions.enableCompileTimeStats = options.enableCompileTimeStats;
 
-    TTNNGreedyL1SpillManagementOptions spillOptions;
-    spillOptions.enableDecisionTrace = options.enableDecisionTrace;
-    spillOptions.decisionTraceDir = options.decisionTraceDir;
+      TTNNGreedyL1SpillManagementOptions spillOptions;
+      spillOptions.enableDecisionTrace = options.enableDecisionTrace;
+      spillOptions.decisionTraceDir = options.decisionTraceDir;
 
-    bool memLayoutEnabled = options.memoryLayoutAnalysisEnabled;
-    pm.addPass(createDevicePassesWrapper(
-        [propagationOptions, spillOptions, validationOptions,
-         memLayoutEnabled](OpPassManager &innerPm) {
-          innerPm.addPass(
-              mlir::tt::ttnn::createTTNNRowMajorLayoutPropagation());
-          innerPm.addPass(mlir::tt::ttnn::createTTNNDeduceMoEComputeLayouts());
-          innerPm.addPass(
-              mlir::tt::ttnn::createTTNNGreedyMemoryLayoutPropagation(
-                  propagationOptions));
-          if (memLayoutEnabled) {
-            innerPm.addPass(mlir::tt::ttnn::createTTNNGreedyL1SpillManagement(
-                spillOptions));
-          }
-          innerPm.addPass(mlir::createCanonicalizerPass());
-          innerPm.addPass(
-              mlir::tt::ttnn::createTTNNOperationValidationAndFallback(
-                  validationOptions));
-          innerPm.addPass(
-              mlir::tt::ttnn::createTTNNPrepareConv2dWeightsAndBias());
-        },
-        wrapperOptions));
+      bool memLayoutEnabled = options.memoryLayoutAnalysisEnabled;
+      pm.addPass(createDevicePassesWrapper(
+          [propagationOptions, spillOptions, validationOptions,
+          memLayoutEnabled](OpPassManager &innerPm) {
+            innerPm.addPass(
+                mlir::tt::ttnn::createTTNNRowMajorLayoutPropagation());
+            innerPm.addPass(mlir::tt::ttnn::createTTNNDeduceMoEComputeLayouts());
+            innerPm.addPass(
+                mlir::tt::ttnn::createTTNNGreedyMemoryLayoutPropagation(
+                    propagationOptions));
+            if (memLayoutEnabled) {
+              innerPm.addPass(mlir::tt::ttnn::createTTNNGreedyL1SpillManagement(
+                  spillOptions));
+            }
+            innerPm.addPass(mlir::createCanonicalizerPass());
+            innerPm.addPass(
+                mlir::tt::ttnn::createTTNNOperationValidationAndFallback(
+                    validationOptions));
+            innerPm.addPass(
+                mlir::tt::ttnn::createTTNNPrepareConv2dWeightsAndBias());
+          },
+          wrapperOptions));
+    } else {
+      // Viterbi optimizer: globally selects operation layouts using the
+      // lowest-cost configuration path through the graph.
+      ttnn::ViterbiOptimizerOptions viterbiOptions(options);
+
+      pm.addPass(createDevicePassesWrapper(
+          [viterbiOptions, validationOptions](OpPassManager &innerPm) {
+            innerPm.addPass(
+                mlir::tt::ttnn::createTTNNRowMajorLayoutPropagation());
+            innerPm.addPass(
+                mlir::tt::ttnn::createViterbiOptimizer(viterbiOptions));
+            innerPm.addPass(mlir::createCanonicalizerPass());
+            innerPm.addPass(
+                mlir::tt::ttnn::createTTNNOperationValidationAndFallback(
+                    validationOptions));
+            innerPm.addPass(
+                mlir::tt::ttnn::createTTNNPrepareConv2dWeightsAndBias());
+          },
+          wrapperOptions));
+      }
 #else
     llvm::llvm_unreachable_internal(
         "TTNN optimizer passes require OpModel support to be enabled.");
