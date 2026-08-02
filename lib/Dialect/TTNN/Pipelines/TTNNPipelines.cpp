@@ -116,26 +116,7 @@ void createTTNNPipelineAnalysisPasses(
     ttnn::TTNNOperationValidationAndFallbackOptions validationOptions;
     validationOptions.maxFallbackAttempts = options.maxFallbackAttempts;
 
-    if (options.enableViterbiOptimizer) {
-      // Viterbi optimizer: globally selects operation layouts using the
-      // lowest-cost configuration path through the graph.
-      ttnn::ViterbiOptimizerOptions viterbiOptions(options);
-
-      pm.addPass(createDevicePassesWrapper(
-          [viterbiOptions, validationOptions](OpPassManager &innerPm) {
-            innerPm.addPass(
-                mlir::tt::ttnn::createTTNNRowMajorLayoutPropagation());
-            innerPm.addPass(
-                mlir::tt::ttnn::createViterbiOptimizer(viterbiOptions));
-            innerPm.addPass(mlir::createCanonicalizerPass());
-            innerPm.addPass(
-                mlir::tt::ttnn::createTTNNOperationValidationAndFallback(
-                    validationOptions));
-            innerPm.addPass(
-                mlir::tt::ttnn::createTTNNPrepareConv2dWeightsAndBias());
-          },
-          wrapperOptions));
-    } else {
+    if (!options.enableViterbiOptimizer) {
       // Greedy optimizer: memory layout propagation + L1 spill management.
       TTNNGreedyMemoryLayoutPropagationPipelineOptions propagationOptions;
       propagationOptions.maxLegalLayouts = options.maxLegalLayouts;
@@ -167,6 +148,25 @@ void createTTNNPipelineAnalysisPasses(
               innerPm.addPass(mlir::tt::ttnn::createTTNNGreedyL1SpillManagement(
                   spillOptions));
             }
+            innerPm.addPass(mlir::createCanonicalizerPass());
+            innerPm.addPass(
+                mlir::tt::ttnn::createTTNNOperationValidationAndFallback(
+                    validationOptions));
+            innerPm.addPass(
+                mlir::tt::ttnn::createTTNNPrepareConv2dWeightsAndBias());
+          },
+          wrapperOptions));
+    } else {
+      // Viterbi optimizer: globally selects operation layouts using the
+      // lowest-cost configuration path through the graph.
+      ttnn::ViterbiOptimizerOptions viterbiOptions(options);
+
+      pm.addPass(createDevicePassesWrapper(
+          [viterbiOptions, validationOptions](OpPassManager &innerPm) {
+            innerPm.addPass(
+                mlir::tt::ttnn::createTTNNRowMajorLayoutPropagation());
+            innerPm.addPass(
+                mlir::tt::ttnn::createViterbiOptimizer(viterbiOptions));
             innerPm.addPass(mlir::createCanonicalizerPass());
             innerPm.addPass(
                 mlir::tt::ttnn::createTTNNOperationValidationAndFallback(
