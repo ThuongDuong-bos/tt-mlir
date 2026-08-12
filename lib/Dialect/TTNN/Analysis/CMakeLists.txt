@@ -8,9 +8,12 @@ add_mlir_dialect_library(MLIRTTNNAnalysis
         LegalOpLayoutAnalysis.cpp
         LegalTensorLayoutAnalysis.cpp
         OpConfigAnalysis.cpp
+        OperationScheduler.cpp
+        TransitionEdgeAnalysis.cpp
         OpModelStrategy.cpp
         ScalarDataTypeAnalysis.cpp
         TensorLayouts.cpp
+
 
         ADDITIONAL_HEADER_DIRS
         ${PROJECT_SOURCE_DIR}/include/ttmlir
