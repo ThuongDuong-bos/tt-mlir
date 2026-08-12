@@ -12,6 +12,10 @@
 #include "ttmlir/Dialect/TTNN/Analysis/OpRules/ConvRules.h"
 #include "ttmlir/Dialect/TTNN/Analysis/ScalarDataTypeAnalysis.h"
 #include "ttmlir/Dialect/TTNN/Analysis/TensorLayouts.h"
+#include "ttmlir/Dialect/TTNN/Analysis/OpCandidatesBuilder.h"
+#include "ttmlir/Dialect/TTNN/Analysis/OperationScheduler.h"
+#include "ttmlir/Dialect/TTNN/Analysis/ViterbiPolicy.h"
+#include "ttmlir/Dialect/TTNN/Analysis/TransitionEdgeAnalysis.h"
 #include "ttmlir/Dialect/TTNN/IR/TTNNOps.h"
 #include "ttmlir/Dialect/TTNN/IR/TTNNOpsAttrs.h"
 #include "ttmlir/Dialect/TTNN/IR/TTNNOpsTypes.h"
@@ -52,6 +56,7 @@ ViterbiOptimizerOptions::ViterbiOptimizerOptions(
     const TTIRToTTNNCommonPipelineOptions &pipelineOptions)
     : overrideOutputLayout(pipelineOptions.overrideOutputLayout),
       overrideConv2dConfig(pipelineOptions.overrideConv2dConfig),
+      memoryLayoutAnalysisEnabled(pipelineOptions.memoryLayoutAnalysisEnabled),
       maxLegalLayouts(pipelineOptions.maxLegalLayouts),
       rowMajorEnabled(pipelineOptions.rowMajorEnabled) {}
 
@@ -108,10 +113,11 @@ public:
 
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ViterbiOptimizerBase<DerivedT>)
 
-  explicit ViterbiOptimizerBase(ViterbiOptimizerOptions options)
+  ViterbiOptimizerBase(ViterbiOptimizerOptions options)
       : ViterbiOptimizerBase() {
     overrideOutputLayout = std::move(options.overrideOutputLayout);
     overrideConv2dConfig = std::move(options.overrideConv2dConfig);
+    memoryLayoutAnalysisEnabled = options.memoryLayoutAnalysisEnabled;
     maxLegalLayouts = options.maxLegalLayouts;
     rowMajorEnabled = options.rowMajorEnabled;
   }
@@ -132,6 +138,11 @@ protected:
           ::llvm::cl::desc(
               "Override Conv2d configuration for specific operations."),
           ::llvm::cl::init(llvm::StringMap<Conv2dConfigOverrideParams>())};
+
+  ::mlir::Pass::Option<bool> memoryLayoutAnalysisEnabled{
+    *this, OptionNames::memoryLayoutAnalysisEnabled,
+    ::llvm::cl::desc("Enable memory layout optimization."),
+    ::llvm::cl::init(false)};
 
   ::mlir::Pass::Option<int64_t> maxLegalLayouts{
       *this, OptionNames::maxLegalLayouts,
@@ -194,7 +205,10 @@ public:
         ttcore::lookupDevice(moduleOp).getWorkerGrid();
 
     llvm::DenseMap<Operation *, std::vector<OpConfig>> legalConfigs;
+    llvm::DenseMap<func::FuncOp, llvm::SmallVector<Operation *>> opSchedule;
     llvm::DenseMap<Operation *, OpConfig> opConfigMap;
+    llvm::DenseMap<Operation *, llvm::SmallVector<TTNNLayoutAttr>>
+      inputLayoutsMap;
 
     // Step 1: Run legal analyses.
 
@@ -281,10 +295,55 @@ public:
     // optimization pipeline, including operation scheduling, candidate
     // construction, Viterbi selection, transition analysis, spilling, and
     // reallocation.
-    OpConfigAnalysis opConfigAnalysis = getAnalysis<OpConfigAnalysis>();
-    opConfigAnalysis.init(OpConfigAnalysisInput(std::move(legalConfigs)));
+    // OpConfigAnalysis opConfigAnalysis = getAnalysis<OpConfigAnalysis>();
+    // opConfigAnalysis.init(OpConfigAnalysisInput(std::move(legalConfigs)));
 
-    opConfigMap = opConfigAnalysis.getResult();
+    // opConfigMap = opConfigAnalysis.getResult();
+
+    if (memoryLayoutAnalysisEnabled) {
+      // Operation Scheduler analysis to get the execution order of operations
+      // in the graph.
+      analysis::OperationScheduler opScheduleAnalysis(getOperation());
+      opScheduleAnalysis.init(analysis::OperationSchedulerInput(
+          analysis::SchedulePolicy::DepthFirstSearch));
+      opSchedule = opScheduleAnalysis.getResult().schedule;
+
+      // Initialize with legal configs
+      OpConfigAnalysis opConfigAnalysis = getAnalysis<OpConfigAnalysis>();
+      opConfigAnalysis.init(OpConfigAnalysisInput(std::move(legalConfigs)));
+      opConfigMap = opConfigAnalysis.getResult();
+      // Build candidates for Viterbi policy based on legal layouts and op
+      OpCandidatesBuilder opCandidatesBuilder;
+      OpCandidateBuilderResult opCandidateResult =
+          opCandidatesBuilder.buildCandidatesFromTensorLayouts(
+              tensorTypePossibleLayouts, opSchedule, opConfigMap);
+
+      // Perform memory layout, op config analysis with Viterbi policy
+      ViterbiPolicy viterbiPolicy(opCandidateResult, opSchedule);
+      ViterbiResult result = viterbiPolicy.run();
+
+      opConfigMap = result.optimalConfigurations;
+      // transitionEdges = result.transitionEdges;
+      // spillToDRAMEdges = result.spillToDRAMEdges; 
+
+      inputLayoutsMap = result.inputLayouts;
+      TransitionEdgeAnalysis transitionEdgeAnalysis(
+          opConfigMap, inputLayoutsMap, opSchedule);
+      if (failed(transitionEdgeAnalysis.run())) {
+        signalPassFailure();
+        return;
+      }
+      transitionEdges = transitionEdgeAnalysis.getTransitionEdges();    
+    } else {
+      // TODO: Default fallback, issue: "No fallback configuration worked"
+      //  Pick optimal op configuration.
+      //
+      OpConfigAnalysis opConfigAnalysis = getAnalysis<OpConfigAnalysis>();
+      // temporary remove to test Viterbi functional first
+      opConfigAnalysis.init(OpConfigAnalysisInput(std::move(legalConfigs)));
+      opConfigMap = opConfigAnalysis.getResult();
+    }
+
 
     // Step 3: Apply transformations based on analysis results.
     //

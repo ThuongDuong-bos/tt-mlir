@@ -23,6 +23,7 @@ struct TTIRToTTNNCommonPipelineOptions;
 struct ViterbiOptimizerOptions {
   llvm::StringMap<OutputLayoutOverrideParams> overrideOutputLayout;
   llvm::StringMap<Conv2dConfigOverrideParams> overrideConv2dConfig;
+  bool memoryLayoutAnalysisEnabled = false;
   int64_t maxLegalLayouts = 64;
   bool rowMajorEnabled = false;
 
