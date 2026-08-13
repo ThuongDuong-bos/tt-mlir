@@ -9,6 +9,9 @@ add_mlir_dialect_library(MLIRTTNNAnalysis
         LegalTensorLayoutAnalysis.cpp
         OpConfigAnalysis.cpp
         OperationScheduler.cpp
+        OpCandidatesBuilder.cpp
+        CostModel.cpp
+        ViterbiPolicy.cpp
         TransitionEdgeAnalysis.cpp
         OpModelStrategy.cpp
         ScalarDataTypeAnalysis.cpp

@@ -1,5 +1,6 @@
-// BOS Semiconductors
+// SPDX-FileCopyrightText: (c) 2026 BOS Semiconductors
 //
+// SPDX-License-Identifier: Apache-2.0
 
 #include "ttmlir/Dialect/TTNN/Analysis/OperationScheduler.h"
 

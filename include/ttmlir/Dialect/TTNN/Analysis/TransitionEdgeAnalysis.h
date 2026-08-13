@@ -3,9 +3,11 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/IR/Value.h"
 #include "ttmlir/Dialect/TTNN/Analysis/OpConfig.h"
 #include "ttmlir/Dialect/TTNN/IR/TTNNOpsAttrs.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include <optional>
@@ -18,19 +20,19 @@ struct TransitionOpInfo {
   TTNNLayoutAttr outputLayout;
 };
 
-// Input to transition builder
+// Input to transition builder.
 struct GetTransitionOpsInput {
-  Operation *producerOp;
-  Operation *consumerOp;
-  Value producerValue;
-  unsigned consumerOperandIndex;
-
+  Value consumerOperand;
   TTNNLayoutAttr producerOutputLayout;
   TTNNLayoutAttr consumerInputLayout;
 };
 
+// Describes a layout transition for one concrete SSA use. The exact producer
+// Value is preserved instead of reconstructing it from a synthetic Edge.
 struct TransitionEdge {
-  Edge edge;
+  Value producerValue;
+  Operation *consumerOp;
+  unsigned consumerOperandIndex;
 
   TTNNLayoutAttr producerLayout;
   TTNNLayoutAttr consumerLayout;
@@ -64,28 +66,30 @@ private:
   llvm::SmallVector<TransitionEdge> transitionEdges;
 
   DenseMap<Value, TTNNLayoutAttr> valueLayoutMap;
-  llvm::DenseSet<Edge> emittedEdges; 
+  llvm::DenseSet<OpOperand *> emittedUses;
 
-  // phases
+  // Phases.
   void resolveOpLayouts();
   void emitEdges();
   LogicalResult validateTransitions();
 
-  // helpers
+  // Helpers.
 
-  // Return required layout for a given op input (if any)
+  // Return required layout for a given op input, if any.
   std::optional<TTNNLayoutAttr> getRequiredLayout(mlir::Operation *op,
                                                   unsigned operandIndex) const;
 
-  // Collect existing layout transition ops
+  // Collect existing layout transition ops.
   llvm::SmallVector<TransitionOpInfo> collectExistingOps(Value v) const;
 
-  // Describe transition sequence (analysis only)
+  // Describe transition sequence (analysis only).
   llvm::SmallVector<TransitionOpInfo>
   getTransitionOps(const GetTransitionOpsInput &input) const;
 
-  // resolve producer op and layout helper
-  std::optional<std::pair<Operation *, TTNNLayoutAttr>> resolveProducerAndLayout(Value v);
+  // Resolve the exact producer Value and the layout currently seen by the
+  // consumer.
+  std::optional<std::pair<Value, TTNNLayoutAttr>>
+  resolveProducerAndLayout(Value value);
 
 };
 

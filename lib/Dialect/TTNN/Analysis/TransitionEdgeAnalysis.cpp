@@ -19,7 +19,7 @@ namespace mlir::tt::ttnn::analysis {
 LogicalResult TransitionEdgeAnalysis::run() {
   // Reset internal state for re-runs
   transitionEdges.clear();
-  emittedEdges.clear();
+  emittedUses.clear();
   valueLayoutMap.clear();
 
   resolveOpLayouts();
@@ -159,7 +159,7 @@ void TransitionEdgeAnalysis::emitEdges() {
           continue;
         }
 
-        auto [producerOp, actualLayout] = *resolved;
+        auto [producerValue, actualLayout] = *resolved;
 
         // Resolve expected layout
         auto required = getRequiredLayout(consumerOp, operandIndex);
@@ -177,19 +177,19 @@ void TransitionEdgeAnalysis::emitEdges() {
           continue;
         }
 
-        // Construct transition edge
-        Edge edge(producerOp, consumerOp, operandIndex);
-        if (!emittedEdges.insert(edge).second) {
+        // Each consumer operand is already an SSA use. Keep that use as the
+        // transition identity instead of creating a synthetic Edge.
+        OpOperand &consumerUse = consumerOp->getOpOperand(operandIndex);
+        if (!emittedUses.insert(&consumerUse).second) {
           continue;
         }
 
-        GetTransitionOpsInput input{producerOp,   consumerOp,   v,
-                                    operandIndex, actualLayout, expectedLayout};
-
+        GetTransitionOpsInput input{v, actualLayout, expectedLayout};
         auto transition = getTransitionOps(input);
 
-        TransitionEdge transitionEdge{edge, actualLayout, expectedLayout,
-                                      transition};
+        TransitionEdge transitionEdge{producerValue, consumerOp, operandIndex,
+                                      actualLayout, expectedLayout,
+                                      std::move(transition)};
 
         transitionEdges.push_back(std::move(transitionEdge));
       }
@@ -205,8 +205,8 @@ LogicalResult TransitionEdgeAnalysis::validateTransitions() {
   for (const TransitionEdge &te : transitionEdges) {
 
     if (te.producerLayout == te.consumerLayout) {
-      if (te.edge.consumerOp) {
-        te.edge.consumerOp->emitError()
+      if (te.consumerOp) {
+        te.consumerOp->emitError()
             << "Invalid TransitionEdge: producer and consumer layouts are "
                "identical, but a transition was generated.\n"
             << "Layout: " << te.producerLayout;
@@ -215,8 +215,8 @@ LogicalResult TransitionEdgeAnalysis::validateTransitions() {
     }
 
     if (te.transitionOps.empty() && te.producerLayout != te.consumerLayout) {
-      if (te.edge.consumerOp) {
-        te.edge.consumerOp->emitError()
+      if (te.consumerOp) {
+        te.consumerOp->emitError()
             << "Invalid TransitionEdge: no transition ops generated for "
                "layout mismatch.\n"
             << "Producer layout: " << te.producerLayout << "\n"
@@ -312,7 +312,7 @@ llvm::SmallVector<TransitionOpInfo> TransitionEdgeAnalysis::getTransitionOps(
 
   llvm::SmallVector<TransitionOpInfo> result;
 
-  auto existingOps = collectExistingOps(input.producerValue);
+  auto existingOps = collectExistingOps(input.consumerOperand);
   for (auto &op : existingOps) {
     result.push_back(op);
   }
@@ -325,7 +325,7 @@ llvm::SmallVector<TransitionOpInfo> TransitionEdgeAnalysis::getTransitionOps(
   return result;
 }
 
-std::optional<std::pair<Operation *, TTNNLayoutAttr>>
+std::optional<std::pair<Value, TTNNLayoutAttr>>
 TransitionEdgeAnalysis::resolveProducerAndLayout(Value v) {
   SmallPtrSet<Value, 8> visited;
 
@@ -368,11 +368,12 @@ TransitionEdgeAnalysis::resolveProducerAndLayout(Value v) {
     auto elementType =
         mlir::tt::ttcore::TileType::get(resultType.getElementType());
 
-    return TTNNLayoutAttr::get(
-        v.getContext(), resultType.getShape(), elementType,
-        bufferTypeAttr.getValue(),
-        mlir::tt::ttcore::GridAttr::get(v.getContext(), {1, 1}),
-        memoryLayoutAttr);
+    return TTNNLayoutAttr::Builder(v.getContext(), resultType.getShape(),
+                                  elementType)
+        .setBufferType(bufferTypeAttr.getValue())
+        .setGridShape({1, 1})
+        .setMemoryLayout(memoryLayoutAttr)
+        .build();
   };
 
   TTNNLayoutAttr actualLayout = getLayoutFromValue(v);
@@ -391,9 +392,9 @@ TransitionEdgeAnalysis::resolveProducerAndLayout(Value v) {
 
     Operation *defOp = v.getDefiningOp();
 
-    // Handle block argument (function input)
+    // A block argument is already an exact SSA producer value.
     if (!defOp) {
-      return std::make_pair(static_cast<Operation *>(nullptr), actualLayout);
+      return std::make_pair(v, actualLayout);
     }
 
     // Handle ToLayoutOp in producer chain
@@ -407,9 +408,9 @@ TransitionEdgeAnalysis::resolveProducerAndLayout(Value v) {
       continue;
     }
 
-    // Stop at compute op (has config)
+    // Stop at the exact result Value of the compute producer.
     if (opConfigMap.count(defOp)) {
-      return std::make_pair(defOp, actualLayout);
+      return std::make_pair(v, actualLayout);
     }
 
     // Otherwise, continue tracing back the producer chain

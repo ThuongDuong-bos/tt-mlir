@@ -1,13 +1,6 @@
-//===- OperationScheduler.h - Operation Scheduler Analysis ------*- C++ -*-===//  
-//  
-// BOS Semiconductor
-//  
-//===----------------------------------------------------------------------===//  
-//  
-// This file defines the OperationScheduler analysis for scheduling DAG-based  
-// computation graphs into topological order with depth-first search policy.  
-//  
-//===----------------------------------------------------------------------===//  
+// SPDX-FileCopyrightText: (c) 2026 BOS Semiconductors
+//
+// SPDX-License-Identifier: Apache-2.0
   
 #ifndef TTMLIR_DIALECT_TTNN_ANALYSIS_OPERATIONSCHEDULER_H  
 #define TTMLIR_DIALECT_TTNN_ANALYSIS_OPERATIONSCHEDULER_H  

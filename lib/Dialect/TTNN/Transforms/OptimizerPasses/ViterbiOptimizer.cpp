@@ -208,7 +208,9 @@ public:
     llvm::DenseMap<func::FuncOp, llvm::SmallVector<Operation *>> opSchedule;
     llvm::DenseMap<Operation *, OpConfig> opConfigMap;
     llvm::DenseMap<Operation *, llvm::SmallVector<TTNNLayoutAttr>>
-      inputLayoutsMap;
+        inputLayoutsMap;
+    [[maybe_unused]] llvm::SmallVector<analysis::TransitionEdge>
+        transitionEdges;
 
     // Step 1: Run legal analyses.
 
@@ -229,12 +231,6 @@ public:
         deviceGrid, &scalarTypes, rowMajorEnabled));
     TensorTypeLayoutsMap tensorTypePossibleLayouts =
         legalTensorLayoutAnalysis.getResult();
-
-    // The initial Viterbi optimizer supports DRAM layouts only. L1 layout
-    // selection and memory management will be enabled after this baseline is
-    // functionally stable.
-    clearShardedLayouts(tensorTypePossibleLayouts);
-    clearL1InterleavedLayouts(tensorTypePossibleLayouts);
 
     moduleOp.walk([&](func::FuncOp func) {
       if (!ttmlir::utils::isForwardDeviceFunc(func)) {
@@ -285,61 +281,57 @@ public:
       });
     });
 
-    // Step 2: Select one legal layout/configuration for each operation.
-    //
-    // The current implementation uses OpConfigAnalysis to select a legal DRAM
-    // configuration for each operation. Global Viterbi optimization will replace
-    // this temporary implementation in a future change.
-    //
-    // TODO(thuongduongbos): Replace OpConfigAnalysis with the full Viterbi
-    // optimization pipeline, including operation scheduling, candidate
-    // construction, Viterbi selection, transition analysis, spilling, and
-    // reallocation.
-    // OpConfigAnalysis opConfigAnalysis = getAnalysis<OpConfigAnalysis>();
-    // opConfigAnalysis.init(OpConfigAnalysisInput(std::move(legalConfigs)));
-
-    // opConfigMap = opConfigAnalysis.getResult();
-
+    // Step 2: Run optimal layout/config analysis.
     if (memoryLayoutAnalysisEnabled) {
-      // Operation Scheduler analysis to get the execution order of operations
-      // in the graph.
+      // Build the full operation schedule first. Conversion-like operations are
+      // kept here because transition analysis still needs the original graph.
       analysis::OperationScheduler opScheduleAnalysis(getOperation());
       opScheduleAnalysis.init(analysis::OperationSchedulerInput(
           analysis::SchedulePolicy::DepthFirstSearch));
       opSchedule = opScheduleAnalysis.getResult().schedule;
 
-      // Initialize with legal configs
-      OpConfigAnalysis opConfigAnalysis = getAnalysis<OpConfigAnalysis>();
-      opConfigAnalysis.init(OpConfigAnalysisInput(std::move(legalConfigs)));
-      opConfigMap = opConfigAnalysis.getResult();
-      // Build candidates for Viterbi policy based on legal layouts and op
+      // Build candidates from the legal OpConfig set, not from an already
+      // selected OpConfig map. Viterbi runs only on the pruned graph, where
+      // reshape/permute/to_layout/typecast/pad-like conversion operations have
+      // been removed.
       OpCandidatesBuilder opCandidatesBuilder;
-      OpCandidateBuilderResult opCandidateResult =
-          opCandidatesBuilder.buildCandidatesFromTensorLayouts(
-              tensorTypePossibleLayouts, opSchedule, opConfigMap);
+      opCandidatesBuilder.buildPrunedCandidates(
+          tensorTypePossibleLayouts, opSchedule, legalConfigs);
 
-      // Perform memory layout, op config analysis with Viterbi policy
-      ViterbiPolicy viterbiPolicy(opCandidateResult, opSchedule);
+      const OpCandidateBuilderResult &opCandidateResult =
+          opCandidatesBuilder.getPrunedCandidates();
+      const PrunedGraphInfo &prunedGraphInfo =
+          opCandidatesBuilder.getPrunedGraphInfo();
+
+      ViterbiPolicy viterbiPolicy(opCandidateResult,
+                                  prunedGraphInfo.prunedSchedule,
+                                  prunedGraphInfo);
       ViterbiResult result = viterbiPolicy.run();
 
-      opConfigMap = result.optimalConfigurations;
-      // transitionEdges = result.transitionEdges;
-      // spillToDRAMEdges = result.spillToDRAMEdges; 
+      if (!isSolverOk(result.status)) {
+        getOperation()->emitError()
+            << "Viterbi memory selection failed with status "
+            << getSolverStatusString(result.status);
+        signalPassFailure();
+        return;
+      }
 
+      opConfigMap = result.optimalConfigurations;
       inputLayoutsMap = result.inputLayouts;
-      TransitionEdgeAnalysis transitionEdgeAnalysis(
+
+      // Transition analysis uses the full schedule so it can reconstruct the
+      // conversion operations removed from the Viterbi graph.
+      analysis::TransitionEdgeAnalysis transitionEdgeAnalysis(
           opConfigMap, inputLayoutsMap, opSchedule);
       if (failed(transitionEdgeAnalysis.run())) {
         signalPassFailure();
         return;
       }
-      transitionEdges = transitionEdgeAnalysis.getTransitionEdges();    
+      transitionEdges = transitionEdgeAnalysis.getTransitionEdges();
     } else {
-      // TODO: Default fallback, issue: "No fallback configuration worked"
-      //  Pick optimal op configuration.
-      //
+      // Fall back to the existing per-op configuration selection when memory
+      // layout optimization is disabled.
       OpConfigAnalysis opConfigAnalysis = getAnalysis<OpConfigAnalysis>();
-      // temporary remove to test Viterbi functional first
       opConfigAnalysis.init(OpConfigAnalysisInput(std::move(legalConfigs)));
       opConfigMap = opConfigAnalysis.getResult();
     }
