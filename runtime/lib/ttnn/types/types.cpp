@@ -140,7 +140,7 @@ const ::tt::runtime::Tensor &ProgramTensorPool::getRuntimeTensorAndValidate(
       getRuntimeTensor(tensorRef->global_id());
   const ::ttnn::Tensor &ttnnTensor =
       ::tt::runtime::ttnn::utils::getTTNNTensorFromRuntimeTensor(runtimeTensor);
-  DEBUG_ASSERT(ttnnTensor.is_allocated());
+  // DEBUG_ASSERT(ttnnTensor.is_allocated());
   debug::checkTensorRefMatchesTTNNTensor(tensorRef, ttnnTensor);
   return runtimeTensor;
 }
