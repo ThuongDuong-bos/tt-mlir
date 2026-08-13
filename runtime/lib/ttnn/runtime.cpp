@@ -1154,6 +1154,10 @@ std::vector<tt::runtime::TensorRef> getOpOutputRefs(OpContext opContextHandle) {
   std::vector<const ::tt::target::ttnn::TensorRef *> tensorRefs;
 
   switch (opContext.type_type()) {
+  case ::tt::target::ttnn::OpType::ReallocateOp: {  
+    tensorRefs = {opContext.type_as_ReallocateOp()->out()};  
+    break;  
+  }
   case ::tt::target::ttnn::OpType::ToMemoryConfigOp: {
     tensorRefs = {opContext.type_as_ToMemoryConfigOp()->out()};
     break;
@@ -1671,6 +1675,10 @@ std::vector<tt::runtime::TensorRef> getOpInputRefs(OpContext opContextHandle) {
     break;
   }
   case ::tt::target::ttnn::OpType::RandOp: {
+    break;
+  }
+  case ::tt::target::ttnn::OpType::ReallocateOp: {
+    tensorRefs = {opContext.type_as_ReallocateOp()->in()};
     break;
   }
   case ::tt::target::ttnn::OpType::DropoutOp: {

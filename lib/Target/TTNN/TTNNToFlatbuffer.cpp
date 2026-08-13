@@ -4135,6 +4135,24 @@ createOp(FlatbufferObjectCache &cache, debug::MemorySnapshotOp op) {
                                                     filePath);
 }
 
+::flatbuffers::Offset<::tt::target::ttnn::ReallocateOp>  
+createOp(FlatbufferObjectCache &cache, ReallocateOp op) {  
+  auto input = cache.at<::tt::target::ttnn::TensorRef>(  
+      getOperandThroughDPSOps(op.getInput()));  
+  
+  // Handle optional memory_config attribute  
+  ::flatbuffers::Offset<::tt::target::ttnn::MemoryConfig> memoryConfig = 0;  
+  if (op.getMemoryConfig()) {  
+    memoryConfig = toFlatbuffer(cache, op.getMemoryConfig().value());  
+  }  
+
+  auto output =  
+      cache.getOrCreateNoSharding(op.getResult(), tensorValueToFlatbuffer, std::nullopt);  
+
+  return ::tt::target::ttnn::CreateReallocateOp(*cache.fbb, input, memoryConfig,  
+                                                output);  
+}
+
 ::flatbuffers::Offset<::tt::target::ttnn::RegionStartOp>
 createOp(FlatbufferObjectCache &cache, debug::RegionStartOp op) {
   auto operand = cache.at<::tt::target::ttnn::TensorRef>(
@@ -5048,6 +5066,10 @@ emitTTNNOperation(FlatbufferObjectCache &cache, Operation *op,
       memorySnapshotOp) {
     return createOperation(cache, createOp(cache, memorySnapshotOp),
                            debugString, locInfo);
+  }
+if (auto reallocateOp = dyn_cast<ReallocateOp>(op); reallocateOp) {
+    return createOperation(cache, createOp(cache, reallocateOp), debugString,
+                           locInfo);
   }
   if (auto regionStartOp = dyn_cast<debug::RegionStartOp>(op); regionStartOp) {
     return createOperation(cache, createOp(cache, regionStartOp), debugString,

@@ -26,6 +26,8 @@ struct ViterbiOptimizerOptions {
   bool memoryLayoutAnalysisEnabled = false;
   int64_t maxLegalLayouts = 64;
   bool rowMajorEnabled = false;
+  bool reallocationAnalysisEnabled = false;
+  double reallocationOffsetCapacity = 0.10;
 
   ViterbiOptimizerOptions() = default;
 

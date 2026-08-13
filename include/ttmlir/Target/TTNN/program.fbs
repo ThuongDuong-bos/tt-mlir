@@ -153,6 +153,7 @@ union OpType {
   BreakpointOp,
   PrintOp,
   MemorySnapshotOp,
+  ReallocateOp,
   RegionStartOp,
   RegionEndOp,
   TopKOp,

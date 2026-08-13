@@ -2051,6 +2051,26 @@ struct OpModel<mlir::tt::ttnn::AssignOp> {
                std::optional<mlir::tt::ttcore::DataType> outputDtype);
 };
 
+//===----------------------------------------------------------------------===//  
+// ReallocateOp  
+//===----------------------------------------------------------------------===//  
+  
+template <>  
+struct OpModel<ReallocateOp> {  
+  static llvm::Expected<OpConstraints>  
+  getOpConstraints(ttcore::GridAttr deviceGrid,  
+                   llvm::ArrayRef<int64_t> inputShape,  
+                   TTNNLayoutAttr inputLayout,  
+                   std::optional<MemoryConfigAttr> memoryConfig,  
+                   TTNNLayoutAttr outputLayout);  
+  
+  static llvm::Expected<size_t>  
+  getOpRuntime(llvm::ArrayRef<int64_t> inputShape,  
+               TTNNLayoutAttr inputLayout,  
+               std::optional<MemoryConfigAttr> memoryConfig,  
+               TTNNLayoutAttr outputLayout);  
+};
+
 //===----------------------------------------------------------------------===//
 // TopKOp
 //===----------------------------------------------------------------------===//

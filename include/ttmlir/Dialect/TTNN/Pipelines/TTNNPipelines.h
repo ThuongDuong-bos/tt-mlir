@@ -71,6 +71,17 @@ struct TTIRToTTNNCommonPipelineOptions
 					"Use the Viterbi optimizer instead of the greedy optimizer."),
 			llvm::cl::init(false)};
 
+    Option<bool> reallocationAnalysisEnabled{
+        *this, "reallocation-analysis-enabled",
+        llvm::cl::desc("Enable L1 reallocation analysis."),
+        llvm::cl::init(false)};
+
+    Option<double> reallocationOffsetCapacity{
+        *this, "reallocation-offset-capacity",
+        llvm::cl::desc(
+            "Reserved L1 fraction between CB and tensor allocations."),
+        llvm::cl::init(0.10)};
+
   // If this option is true, run a pass that checks if all ops relevant
   // to the optimizer (e.g. toLayout is ignored) have unique named locations.
   // If not, it will emit an error. This is necessary for the overrides to be

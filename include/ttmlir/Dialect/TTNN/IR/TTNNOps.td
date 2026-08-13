@@ -4217,6 +4217,25 @@ def TTNN_AggregateTensorOp : TTNN_Op<"aggregate_tensor", [OpModelExempt]> {
   let results = (outs AnyRankedTensor:$result);
 }
 
+def TTNN_ReallocateOp : TTNN_MemFreeOp<"reallocate"> {  
+    let summary = "Reallocate op for tensor memory optimization.";  
+    let description = [{  
+      Reallocates a tensor to a new memory configuration to reduce fragmentation.  
+      This operation is used by the optimizer to move tensors between different  
+      memory spaces or layouts when beneficial for performance.  
+        
+      Args:  
+        - input: The tensor to be reallocated  
+        - memory_config: Optional new memory configuration for the reallocated tensor  
+    }];  
+  
+    let arguments = (ins AnyRankedTensor:$input,  
+                         OptionalAttr<TTNN_MemoryConfigAttr>:$memory_config);  
+    let results = (outs AnyRankedTensor:$result);  
+  
+    let hasVerifier = 1;  
+}
+
 def TTNN_SamplingOp : TTNN_Op<"sampling"> {
   let summary = "Sampling operation.";
   let description = [{

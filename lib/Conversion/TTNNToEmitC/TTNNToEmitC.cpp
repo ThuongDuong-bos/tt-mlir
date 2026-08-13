@@ -5427,6 +5427,36 @@ public:
 };
 } // namespace
 
+// ReallocateOp conversion pattern  
+//  
+namespace {  
+class ReallocateOpConversionPattern  
+    : public TTNNToEmitCBaseOpConversionPattern<mlir::tt::ttnn::ReallocateOp> {  
+  
+public:  
+  using TTNNToEmitCBaseOpConversionPattern<  
+      mlir::tt::ttnn::ReallocateOp>::TTNNToEmitCBaseOpConversionPattern;  
+  
+  LogicalResult  
+  matchAndRewrite(mlir::tt::ttnn::ReallocateOp srcOp, OpAdaptor adaptor,  
+                  ConversionPatternRewriter &rewriter) const override {  
+  
+    ttnn_to_emitc::EmitCTTNNEmitter<mlir::tt::ttnn::ReallocateOp> emitter(  
+        srcOp, adaptor, rewriter);  
+  
+    llvm::SmallVector<mlir::Attribute> args{  
+        emitter.emit(srcOp.getInput()),  
+        srcOp.getMemoryConfig()   
+          ? emitter.emit(srcOp.getMemoryConfig())  
+          : emitter.emit(std::nullopt),
+    };  
+  
+    emitter.replaceOp(*this, args);  
+    return success();  
+  }  
+};  
+} // namespace
+
 namespace {
 class TTNNToEmitCTopKRouterGptOpConversionPattern
     : public TTNNToEmitCBaseOpConversionPattern<
@@ -5653,6 +5683,7 @@ void populateTTNNToEmitCPatterns(mlir::MLIRContext *ctx,
            RepeatInterleaveOpConversionPattern, SliceStaticOpConversionPattern,
            SliceDynamicOpConversionPattern, SortOpConversionPattern,
            PermuteOpConversionPattern, PadOpConversionPattern,
+           ReallocateOpConversionPattern,
            TTNNToEmitCTopKOpConversionPattern,
            TTNNToEmitCSamplingOpConversionPattern, GatherOpConversionPattern>(
           typeConverter, ctx);

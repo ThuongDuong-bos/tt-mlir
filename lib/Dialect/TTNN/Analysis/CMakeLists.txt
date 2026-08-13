@@ -13,6 +13,7 @@ add_mlir_dialect_library(MLIRTTNNAnalysis
         CostModel.cpp
         ViterbiPolicy.cpp
         TransitionEdgeAnalysis.cpp
+        ReallocationAnalysis.cpp
         OpModelStrategy.cpp
         ScalarDataTypeAnalysis.cpp
         TensorLayouts.cpp

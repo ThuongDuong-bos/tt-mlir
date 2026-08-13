@@ -58,6 +58,7 @@
 #include "operations/data_movement/sort.h"
 #include "operations/data_movement/transpose.h"
 #include "operations/data_movement/write_tensor.h"
+#include "operations/data_movement/reallocate.h"
 #include "operations/debug/debug.h"
 #include "operations/deletion/deallocate.h"
 #include "operations/eltwise/binary/binary.h"
@@ -488,6 +489,10 @@ void ProgramExecutor::runOperation(const ::tt::target::ttnn::Operation *op) {
   }
   case ::tt::target::ttnn::OpType::AssignOp: {
     return operations::data_movement::run(op->type_as_AssignOp(), getContext());
+  }
+  case ::tt::target::ttnn::OpType::ReallocateOp: {
+    return operations::data_movement::run(op->type_as_ReallocateOp(),
+                                          getContext());
   }
   case ::tt::target::ttnn::OpType::PrepareConv2dWeightsOp: {
     return operations::conv::run(op->type_as_PrepareConv2dWeightsOp(),

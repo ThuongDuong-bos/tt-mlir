@@ -5101,4 +5101,35 @@ TopKOp::getOpRuntime(const std::vector<TTNNLayoutAttr> &inputs,
       inputShape, inputs[0], getK(), getDim(), getLargest(), getSorted(),
       opConfig.outputLayout);
 }
+
+//===----------------------------------------------------------------------===//
+// ReallocateOp - TTNN Op Model Interface
+//===----------------------------------------------------------------------===//
+
+llvm::Expected<op_model::OpConstraints>
+ReallocateOp::getOpConstraints(const std::vector<TTNNLayoutAttr> &inputs,
+                               const OpConfig &opConfig) {
+  assert(inputs.size() == 1);
+
+  const auto inputShape = getInput().getType().getShape();
+
+  ttcore::GridAttr deviceGrid =
+      ttcore::lookupDevice(getOperation()).getWorkerGrid();
+
+  return opConstraintsCache().getOrCompute(
+      op_model::OpModel<ReallocateOp>::getOpConstraints, *this, deviceGrid,
+      inputShape, inputs[0], getMemoryConfig(), opConfig.outputLayout);
+}
+
+llvm::Expected<size_t>
+ReallocateOp::getOpRuntime(const std::vector<TTNNLayoutAttr> &inputs,
+                           const OpConfig &opConfig) {
+  assert(inputs.size() == 1);
+
+  const auto inputShape = getInput().getType().getShape();
+
+  return opRuntimeCache().getOrCompute(
+      op_model::OpModel<ReallocateOp>::getOpRuntime, *this, inputShape,
+      inputs[0], getMemoryConfig(), opConfig.outputLayout);
+}
 } // namespace mlir::tt::ttnn

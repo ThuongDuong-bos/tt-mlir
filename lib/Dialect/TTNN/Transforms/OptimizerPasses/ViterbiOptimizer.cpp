@@ -9,6 +9,7 @@
 #include "ttmlir/Dialect/TTNN/Analysis/LegalTensorLayoutAnalysis.h"
 #include "ttmlir/Dialect/TTNN/Analysis/OpConfig.h"
 #include "ttmlir/Dialect/TTNN/Analysis/OpConfigAnalysis.h"
+#include "ttmlir/Dialect/TTNN/Analysis/ReallocationAnalysis.h"
 #include "ttmlir/Dialect/TTNN/Analysis/OpRules/ConvRules.h"
 #include "ttmlir/Dialect/TTNN/Analysis/ScalarDataTypeAnalysis.h"
 #include "ttmlir/Dialect/TTNN/Analysis/TensorLayouts.h"
@@ -58,7 +59,9 @@ ViterbiOptimizerOptions::ViterbiOptimizerOptions(
       overrideConv2dConfig(pipelineOptions.overrideConv2dConfig),
       memoryLayoutAnalysisEnabled(pipelineOptions.memoryLayoutAnalysisEnabled),
       maxLegalLayouts(pipelineOptions.maxLegalLayouts),
-      rowMajorEnabled(pipelineOptions.rowMajorEnabled) {}
+      rowMajorEnabled(pipelineOptions.rowMajorEnabled),
+      reallocationAnalysisEnabled(pipelineOptions.reallocationAnalysisEnabled),
+      reallocationOffsetCapacity(pipelineOptions.reallocationOffsetCapacity) {}
 
 namespace impl {
 
@@ -120,6 +123,8 @@ public:
     memoryLayoutAnalysisEnabled = options.memoryLayoutAnalysisEnabled;
     maxLegalLayouts = options.maxLegalLayouts;
     rowMajorEnabled = options.rowMajorEnabled;
+    reallocationAnalysisEnabled = options.reallocationAnalysisEnabled;
+    reallocationOffsetCapacity = options.reallocationOffsetCapacity;
   }
 
 protected:
@@ -156,6 +161,17 @@ protected:
       ::llvm::cl::desc(
           "Enable row-major layout generation in legal layout analysis."),
       ::llvm::cl::init(false)};
+
+  ::mlir::Pass::Option<bool> reallocationAnalysisEnabled{
+      *this, "reallocation-analysis-enabled",
+      ::llvm::cl::desc("Enable L1 reallocation analysis."),
+      ::llvm::cl::init(false)};
+
+  ::mlir::Pass::Option<double> reallocationOffsetCapacity{
+      *this, "reallocation-offset-capacity",
+      ::llvm::cl::desc(
+          "Reserved L1 fraction between CB and tensor allocations."),
+      ::llvm::cl::init(0.10)};
 
 private:
   friend std::unique_ptr<::mlir::Pass> createViterbiOptimizer() {
@@ -209,8 +225,8 @@ public:
     llvm::DenseMap<Operation *, OpConfig> opConfigMap;
     llvm::DenseMap<Operation *, llvm::SmallVector<TTNNLayoutAttr>>
         inputLayoutsMap;
-    [[maybe_unused]] llvm::SmallVector<analysis::TransitionEdge>
-        transitionEdges;
+    llvm::SmallVector<analysis::TransitionEdge> transitionEdges;
+    llvm::SmallVector<SpillRequest> spillRequests;
 
     // Step 1: Run legal analyses.
 
@@ -318,6 +334,7 @@ public:
 
       opConfigMap = result.optimalConfigurations;
       inputLayoutsMap = result.inputLayouts;
+      spillRequests = result.spillRequests;
 
       // Transition analysis uses the full schedule so it can reconstruct the
       // conversion operations removed from the Viterbi graph.
@@ -339,9 +356,9 @@ public:
 
     // Step 3: Apply transformations based on analysis results.
     //
-    // Apply the selected output layout and operation-specific configuration to
-    // each operation. Scheduling, transition materialization, spilling, and
-    // reallocation will be added with the Viterbi analysis later.
+    // Apply the selected output layout and operation-specific configuration,
+    // then materialize transition and spill decisions. Reallocation analysis
+    // runs on the resulting SSA graph after these rewrites.
     moduleOp.walk([&](func::FuncOp func) {
       if (!ttmlir::utils::isForwardDeviceFunc(func)) {
         return;
@@ -475,6 +492,12 @@ public:
             });
       });
 
+      // Materialize layout changes after selected configurations have been
+      // applied. Transition rewrites are consumer-local; spill rewrites use
+      // exact SSA values selected by Viterbi.
+      processTransitionEdges(transitionEdges, func);
+      processSpillRequests(spillRequests, func);
+
       // Update the function type to reflect the updated return operand types.
       SmallVector<Type> funcResultTypes;
 
@@ -499,10 +522,266 @@ public:
       func.setType(newFuncType);
     });
 
+    // Step 4: Run reallocation analysis on the final layout/materialization
+    // graph. Rebuild the schedule and fill configs for conversion ops inserted
+    // during transition/spill materialization.
+    if (memoryLayoutAnalysisEnabled && reallocationAnalysisEnabled) {
+      llvm::DenseMap<func::FuncOp, llvm::SmallVector<Operation *>>
+          reallocationSchedule;
+      llvm::DenseMap<Operation *, OpConfig> reallocationOpConfigMap =
+          opConfigMap;
+
+      moduleOp.walk([&](func::FuncOp func) {
+        if (!ttmlir::utils::isForwardDeviceFunc(func)) {
+          return;
+        }
+
+        auto &schedule = reallocationSchedule[func];
+        func.walk([&](Operation *op) {
+          schedule.push_back(op);
+
+          if (reallocationOpConfigMap.contains(op)) {
+            return;
+          }
+
+          std::optional<TTNNLayoutAttr> outputLayout =
+              optimizer_utils::extractOutputLayoutFromIR(op);
+          if (outputLayout) {
+            reallocationOpConfigMap[op] = OpConfig{*outputLayout};
+          }
+        });
+      });
+
+      ReallocationAnalysis reallocationAnalysis =
+          getAnalysis<ReallocationAnalysis>();
+      reallocationAnalysis.init(ReallocationAnalysisInput(
+          std::move(reallocationOpConfigMap),
+          std::move(reallocationSchedule),
+          utils::getUsableL1PerCore(moduleOp),
+          reallocationOffsetCapacity));
+
+      const ReallocationAnalysisResult &reallocationResult =
+          reallocationAnalysis.getResult();
+
+      TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+                   "Reallocation result:\n{}", reallocationResult);
+
+      OpBuilder builder(&getContext());
+      processReallocationValues(
+          reallocationResult.memReallocateValuesMap, builder);
+    }
+
 #endif
   }
 
 private:
+  static RankedTensorType
+  getTensorTypeWithLayout(RankedTensorType inputType,
+                          TTNNLayoutAttr outputLayout) {
+    Type elementType = inputType.getElementType();
+
+    if (!mlir::isa<mlir::quant::QuantizedType>(elementType)) {
+      elementType = outputLayout.getScalarElementType();
+    } else {
+      auto quantizedType =
+          mlir::cast<mlir::quant::QuantizedType>(elementType);
+      assert(quantizedType.getStorageType() ==
+                 outputLayout.getScalarElementType() &&
+             "Layout scalar element type must match quantized storage type");
+    }
+
+    return RankedTensorType::get(inputType.getShape(), elementType,
+                                 outputLayout);
+  }
+
+  static Value materializeToLayout(Value input, TTNNLayoutAttr outputLayout,
+                                   Operation *insertBefore,
+                                   llvm::StringRef locSuffix) {
+    if (!input || !outputLayout || !insertBefore) {
+      return {};
+    }
+
+    auto inputType = mlir::dyn_cast<RankedTensorType>(input.getType());
+    if (!inputType) {
+      return {};
+    }
+
+    RankedTensorType outputType =
+        getTensorTypeWithLayout(inputType, outputLayout);
+
+    OpBuilder builder(insertBefore);
+    builder.setInsertionPoint(insertBefore);
+
+    Location loc = ttmlir::utils::appendLocationSuffix(
+        insertBefore->getLoc(), locSuffix);
+
+    // In this branch ToLayoutOp derives layout/dtype/memory configuration from
+    // the result tensor encoding. Its builder only takes result type + input.
+    return builder.create<ToLayoutOp>(loc, outputType, input).getResult();
+  }
+
+  static void processTransitionEdges(
+      llvm::ArrayRef<analysis::TransitionEdge> transitionEdges,
+      func::FuncOp func) {
+    for (const analysis::TransitionEdge &transitionEdge : transitionEdges) {
+      Operation *consumerOp = transitionEdge.consumerOp;
+      if (!consumerOp ||
+          consumerOp->getParentOfType<func::FuncOp>() != func ||
+          transitionEdge.consumerOperandIndex >= consumerOp->getNumOperands()) {
+        continue;
+      }
+
+      Value input =
+          consumerOp->getOperand(transitionEdge.consumerOperandIndex);
+      auto inputType = mlir::dyn_cast<RankedTensorType>(input.getType());
+      if (!inputType || !transitionEdge.consumerLayout) {
+        continue;
+      }
+
+      TTNNLayoutAttr inputLayout =
+          mlir::dyn_cast_or_null<TTNNLayoutAttr>(inputType.getEncoding());
+      if (inputLayout == transitionEdge.consumerLayout) {
+        continue;
+      }
+
+      Value converted =
+          materializeToLayout(input, transitionEdge.consumerLayout, consumerOp,
+                              "_viterbi_transition");
+      if (!converted) {
+        consumerOp->emitError()
+            << "Failed to materialize Viterbi layout transition";
+        continue;
+      }
+
+      // Rewrite only the exact SSA use described by TransitionEdgeAnalysis.
+      consumerOp->setOperand(transitionEdge.consumerOperandIndex, converted);
+    }
+  }
+
+  static void processSpillRequests(
+      llvm::ArrayRef<SpillRequest> spillRequests, func::FuncOp func) {
+    auto isUseAfterTrigger = [](Operation *useOp, Operation *triggerOp) {
+      return useOp && triggerOp &&
+             useOp->getBlock() == triggerOp->getBlock() &&
+             triggerOp->isBeforeInBlock(useOp);
+    };
+
+    for (const SpillRequest &spillRequest : spillRequests) {
+      Value value = spillRequest.value;
+      Operation *triggerOp = spillRequest.triggerOp;
+
+      if (!value || !triggerOp ||
+          triggerOp->getParentOfType<func::FuncOp>() != func) {
+        continue;
+      }
+
+      auto valueType = mlir::dyn_cast<RankedTensorType>(value.getType());
+      if (!valueType) {
+        continue;
+      }
+
+      TTNNLayoutAttr valueLayout =
+          mlir::dyn_cast_or_null<TTNNLayoutAttr>(valueType.getEncoding());
+      if (!valueLayout || valueLayout.getBufferType() != BufferType::L1) {
+        continue;
+      }
+
+      // Snapshot later uses before creating the spill op so the spill op's own
+      // input cannot become part of the rewrite set.
+      llvm::SmallVector<OpOperand *> laterUses;
+      for (OpOperand &use : value.getUses()) {
+        if (isUseAfterTrigger(use.getOwner(), triggerOp)) {
+          laterUses.push_back(&use);
+        }
+      }
+
+      if (laterUses.empty()) {
+        continue;
+      }
+
+      TTNNLayoutAttr dramLayout =
+          TTNNLayoutAttr::Builder(valueLayout, valueType.getShape())
+              .setBufferType(BufferType::DRAM)
+              .setMemoryLayout(TensorMemoryLayout::Interleaved)
+              .build();
+
+      Value spillValue =
+          materializeToLayout(value, dramLayout, triggerOp, "_spill_to_dram");
+      if (!spillValue) {
+        continue;
+      }
+
+      for (OpOperand *use : laterUses) {
+        if (!use) {
+          continue;
+        }
+
+        Operation *userOp = use->getOwner();
+        if (!userOp || userOp->getBlock() != triggerOp->getBlock()) {
+          continue;
+        }
+
+        // If a later conversion already exists, let it consume the spilled
+        // DRAM value directly. That conversion becomes the reload.
+        if (mlir::isa<ToLayoutOp, ToMemoryConfigOp, TypecastOp>(userOp)) {
+          use->set(spillValue);
+          continue;
+        }
+
+        // Compute users still expect the selected pre-spill layout. Insert a
+        // reload immediately before that exact use.
+        Value reloadValue =
+            materializeToLayout(spillValue, valueLayout, userOp,
+                                "_reload_from_dram");
+        if (!reloadValue) {
+          continue;
+        }
+
+        use->set(reloadValue);
+      }
+    }
+  }
+
+  static void processReallocationValues(
+      const llvm::DenseMap<Operation *, llvm::DenseSet<Value>>
+          &memReallocateValuesMap,
+      OpBuilder &builder) {
+    llvm::DenseSet<Value> alreadyReallocated;
+
+    for (const auto &[_, values] : memReallocateValuesMap) {
+      for (Value value : values) {
+        if (!value || alreadyReallocated.contains(value)) {
+          continue;
+        }
+
+        Operation *producerOp = value.getDefiningOp();
+        if (!producerOp) {
+          continue;
+        }
+
+        alreadyReallocated.insert(value);
+
+        // Snapshot uses before creating ReallocateOp so its own input is not
+        // rewritten to the newly created result.
+        llvm::SmallVector<OpOperand *> uses;
+        for (OpOperand &use : value.getUses()) {
+          uses.push_back(&use);
+        }
+
+        builder.setInsertionPointAfter(producerOp);
+        Location loc = ttmlir::utils::appendLocationSuffix(
+            producerOp->getLoc(), "_reallocate");
+
+        auto reallocateOp = builder.create<ReallocateOp>(
+            loc, value.getType(), value, /*memory_config=*/nullptr);
+
+        for (OpOperand *use : uses) {
+          use->set(reallocateOp.getResult());
+        }
+      }
+    }
+  }
+
   void assertOverridesValid() {
     llvm::StringMap<bool> overriddenOpExists;
     llvm::StringMap<bool> overriddenConv2dOps;

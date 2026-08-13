@@ -7088,4 +7088,68 @@ void mlir::tt::ttnn::D2MSubgraphOp::getEffects(
   return success();
 }
 
+//===----------------------------------------------------------------------===//  
+// ReallocateOp  
+//===----------------------------------------------------------------------===//  
+  
+::mlir::LogicalResult mlir::tt::ttnn::ReallocateOp::verify() {  
+  ::mlir::RankedTensorType inputType = getInput().getType();  
+  ::mlir::RankedTensorType outputType = getResult().getType();  
+  
+  // Check that input and output have the same shape and element type  
+  if (inputType.getShape() != outputType.getShape()) {  
+    return emitOpError() << "Input and output tensor shapes must match, but got "  
+                         << "input shape " << inputType.getShape()  
+                         << " and output shape " << outputType.getShape();  
+  }  
+  
+  if (inputType.getElementType() != outputType.getElementType()) {  
+    return emitOpError() << "Input and output element types must match, but got "  
+                         << "input type " << inputType.getElementType()  
+                         << " and output type " << outputType.getElementType();  
+  }  
+  
+  // Verify input has layout encoding  
+  auto inputLayout = dyn_cast_if_present<TTNNLayoutAttr>(inputType.getEncoding());  
+  if (!inputLayout) {  
+    return emitOpError("Input tensor must have a layout encoding");  
+  }  
+  
+  // Verify output has layout encoding  
+  auto outputLayout = dyn_cast_if_present<TTNNLayoutAttr>(outputType.getEncoding());  
+  if (!outputLayout) {  
+    return emitOpError("Output tensor must have a layout encoding");  
+  }  
+  
+  // If memory_config is specified, verify it matches output layout  
+  if (getMemoryConfig()) {  
+    MemoryConfigAttr memConfig = getMemoryConfigAttr();  
+      
+    // Check buffer type consistency  
+    if (memConfig.getBufferType().getValue() != outputLayout.getBufferType()) {  
+      return emitOpError() << "Memory config buffer type "  
+                           << stringifyBufferType(memConfig.getBufferType().getValue())  
+                           << " must match output tensor buffer type "  
+                           << stringifyBufferType(outputLayout.getBufferType());  
+    }  
+  
+    // Check memory layout consistency  
+    if (memConfig.getTensorMemoryLayout() != outputLayout.getMemLayout()) {  
+      return emitOpError() << "Memory config layout "  
+                           << memConfig.getTensorMemoryLayout()  
+                           << " must match output tensor layout "  
+                           << outputLayout.getMemLayout();  
+    }  
+  
+    // Validate device memory layout constraints  
+    if (isDeviceBufferType(outputLayout.getBufferType())) {  
+      if (!isValidDeviceLayout(outputLayout.getMemLayout())) {  
+        return emitOpError("Device memory only supports interleaved or sharded layouts");  
+      }  
+    }  
+  }  
+  
+  return success();  
+}
+
 } // namespace mlir::tt::ttnn

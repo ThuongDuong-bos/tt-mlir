@@ -8129,6 +8129,75 @@ llvm::Expected<size_t> OpModel<mlir::tt::ttnn::AssignOp>::getOpRuntime(
 #endif // TTMLIR_ENABLE_OPMODEL
 }
 
+//===----------------------------------------------------------------------===//  
+// ReallocateOp  
+//===----------------------------------------------------------------------===//  
+  
+llvm::Expected<OpConstraints> OpModel<ReallocateOp>::getOpConstraints(  
+    ttcore::GridAttr deviceGrid, llvm::ArrayRef<int64_t> inputShape,  
+    TTNNLayoutAttr inputLayout, std::optional<MemoryConfigAttr> memoryConfig,  
+    TTNNLayoutAttr outputLayout) {  
+#ifdef TTMLIR_ENABLE_OPMODEL  
+  ::tt::tt_metal::distributed::MeshDevice *device =  
+      SingletonDeviceContext::getInstance().getDevice();  
+  
+  auto inputSpecExp = 
+      detail::convertToTensorSpec(device, inputShape, inputLayout);  
+  if (!inputSpecExp) {  
+    return inputSpecExp.takeError();  
+  }  
+  ::ttnn::TensorSpec inputSpec = inputSpecExp.get();  
+  
+  // Create query closure  
+  auto reallocateOpQuery = [=]() {  
+    if (memoryConfig) {  
+      return ::ttnn::graph::query_op_constraints(  
+          ::ttnn::reallocate, device, inputSpec,  
+          conversion::getMemoryConfig(memoryConfig.value()));  
+    }  
+    return ::ttnn::graph::query_op_constraints(  
+        ::ttnn::reallocate, device, inputSpec, std::nullopt);  
+  };  
+  
+  return operation::getOpConstraints(
+    inputLayout.getContext(), reallocateOpQuery); 
+#else  
+  return OpConstraints{};  
+#endif // TTMLIR_ENABLE_OPMODEL  
+}  
+
+llvm::Expected<size_t> OpModel<ReallocateOp>::getOpRuntime(  
+    llvm::ArrayRef<int64_t> inputShape, TTNNLayoutAttr inputLayout,  
+    std::optional<MemoryConfigAttr> memoryConfig,  
+    TTNNLayoutAttr outputLayout) {  
+#ifdef TTMLIR_ENABLE_OPMODEL
+  ::tt::tt_metal::distributed::MeshDevice *device =  
+      SingletonDeviceContext::getInstance().getDevice();  
+
+  auto inputSpecExp =  
+      detail::convertToTensorSpec(device, inputShape, inputLayout);  
+  if (!inputSpecExp) {  
+    return inputSpecExp.takeError();  
+  }  
+  ::ttnn::TensorSpec inputSpec = inputSpecExp.get();  
+  
+  // Create query closure  
+  auto reallocateOpQuery = [=]() {  
+    if (memoryConfig) {  
+      return ::ttnn::graph::query_op_runtime(  
+          ::ttnn::reallocate, device, inputSpec,  
+          conversion::getMemoryConfig(memoryConfig.value()));  
+    }  
+    return ::ttnn::graph::query_op_runtime(  
+        ::ttnn::reallocate, device, inputSpec, std::nullopt);  
+  };  
+  
+  return operation::getOpRuntime(reallocateOpQuery);  
+#else  
+  return llvm::createStringError("Not Implemented");  
+#endif // TTMLIR_ENABLE_OPMODEL  
+}
+
 //===----------------------------------------------------------------------===//
 // TopKOp
 //===----------------------------------------------------------------------===//
