@@ -85,13 +85,14 @@ public:
 
   // Check if a value has a conv2d/conv_transpose2d user with
   // deallocate_activation=true that is not the last user, which would cause a
-  // use-after-free.
-  LogicalResult checkConv2dUseAfterFree(Value value, Operation *lastOp) {
+  // use-after-free. Auto-fix by forcing deallocate_activation=false.
+  LogicalResult checkConv2dUseAfterFree(IRRewriter &rewriter, Value value, 
+                                        Operation *lastOp) {
+    // First, check if value has multiple users (fork pattern)
+    // If yes, force deallocate_activation=false for all Conv2d users
+    bool hasFork = !value.hasOneUse();
+    
     for (Operation *user : value.getUsers()) {
-      if (user == lastOp) {
-        continue;
-      }
-
       auto result =
           llvm::TypeSwitch<Operation *, LogicalResult>(user)
               .Case<ttnn::Conv2dOp, ttnn::ConvTranspose2dOp>([&](auto convOp) {
@@ -101,10 +102,13 @@ public:
                     convOp.getConv2dConfigAttr()
                         .getDeallocateActivation()
                         .getValue()) {
-                  convOp->emitError(
-                      "use-after-free detected: op deallocates its input but "
-                      "is not the last user");
-                  return failure();
+                  // Check if this is in a fork pattern OR not the last user
+                  if (hasFork || user != lastOp) {
+                    // Auto-fix: force deallocate_activation=false
+                    auto oldConfig = convOp.getConv2dConfigAttr();
+                    auto newConfig = oldConfig.withDeallocateActivation(false);
+                    convOp.setConv2dConfigAttr(newConfig);                    
+                  }
                 }
                 return success();
               })
@@ -146,7 +150,8 @@ public:
       // Sanity check: if there are any conv2d ops that consume this
       // value and deallocate it (via deallocate_activation=true), ensure
       // they are the last user to prevent use-after-free.
-      if (failed(checkConv2dUseAfterFree(value, lastOp))) {
+      // Auto-fix by forcing deallocate_activation=false if needed.
+      if (failed(checkConv2dUseAfterFree(rewriter, value, lastOp))) {
         return failure();
       }
 

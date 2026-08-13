@@ -44,11 +44,17 @@ enum class SolverStatus {
 const char *getSolverStatusString(SolverStatus status);
 bool isSolverOk(SolverStatus status);
 
+struct SpillRequest {
+  mlir::Value value;
+  mlir::Operation *triggerOp = nullptr;
+};
+
 // Returned by ViterbiPolicy after execution
 struct ViterbiResult {
   llvm::DenseMap<mlir::Operation *, OpConfig> optimalConfigurations;
   llvm::DenseMap<mlir::Operation *, llvm::SmallVector<TTNNLayoutAttr>>
       inputLayouts;
+  llvm::SmallVector<SpillRequest> spillRequests;
   SolverStatus status = SolverStatus::Success;
   double totalCost = 0.0;
   size_t numL1Configs = 0;   // How many ops got L1 placement
