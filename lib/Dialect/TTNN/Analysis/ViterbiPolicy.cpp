@@ -294,17 +294,57 @@ SolverStatus ViterbiPolicy::validateFinalAssignment() const {
           goto returnStatus;
         }
 
-        if (parentSelectedIt->second !=
+        const size_t selectedParentCandIdx = parentSelectedIt->second;
+
+        if (selectedParentCandIdx !=
             static_cast<size_t>(expectedParentCandIdx)) {
-          TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
-                       "ValidateFinalAssignment: parent op {} selected "
-                       "candidate {} does not match op {} candidate {} "
-                       "expected parent candidate {}",
-                       parentOp->getName().getStringRef(),
-                       parentSelectedIt->second, op->getName().getStringRef(),
-                       selectedCandidateIdx, expectedParentCandIdx);
-          status = SolverStatus::InvalidTransitionState;
-          goto returnStatus;
+          auto parentCandidateIt = candidateResult.candidateMap.find(parentOp);
+
+          const bool hasParentCandidate =
+              parentCandidateIt != candidateResult.candidateMap.end() &&
+              selectedParentCandIdx < parentCandidateIt->second.size();
+
+          if (!hasParentCandidate) {
+            TTMLIR_DEBUG(
+                ttmlir::LogComponent::ViterbiOptimizer,
+                "ValidateFinalAssignment: parent op {} selected candidate {} is "
+                "invalid while validating op {} candidate {} expected parent "
+                "candidate {}",
+                parentOp->getName().getStringRef(), selectedParentCandIdx,
+                op->getName().getStringRef(), selectedCandidateIdx,
+                expectedParentCandIdx);
+
+            status = SolverStatus::InvalidCandidateSelection;
+            goto returnStatus;
+          }
+
+          const double resolvedTransitionCost = getBestTransitionCost(
+              parentOp, parentCandidateIt->second[selectedParentCandIdx], op,
+              candidateIt->second[selectedCandidateIdx],
+              getCandidateAdditionalL1Usage(op, selectedCandidateIdx).value_or(0));
+
+          if (!std::isfinite(resolvedTransitionCost)) {
+            TTMLIR_DEBUG(
+                ttmlir::LogComponent::ViterbiOptimizer,
+                "ValidateFinalAssignment: parent op {} selected candidate {} "
+                "does not match op {} candidate {} expected parent candidate {}, "
+                "and resolved transition is invalid",
+                parentOp->getName().getStringRef(), selectedParentCandIdx,
+                op->getName().getStringRef(), selectedCandidateIdx,
+                expectedParentCandIdx);
+
+            status = SolverStatus::InvalidTransitionState;
+            goto returnStatus;
+          }
+
+          TTMLIR_DEBUG(
+              ttmlir::LogComponent::ViterbiOptimizer,
+              "ValidateFinalAssignment: accepted conflict-resolved parent op {} "
+              "candidate {} for op {} candidate {} originally expected parent "
+              "candidate {}",
+              parentOp->getName().getStringRef(), selectedParentCandIdx,
+              op->getName().getStringRef(), selectedCandidateIdx,
+              expectedParentCandIdx);
         }
       }
     }
@@ -335,6 +375,52 @@ ViterbiResult ViterbiPolicy::constructResult(SolverStatus status) const {
     result.optimalConfigurations[op] = bestCandidate.opConfig;
     result.inputLayouts[op] = bestCandidate.inputLayouts;
 
+    auto spillCountsIt = selectedSpillCounts.find(op);
+    if (spillCountsIt != selectedSpillCounts.end() &&
+        bestIdx < spillCountsIt->second.size()) {
+      const size_t selectedSpillCount = spillCountsIt->second[bestIdx];
+
+      if (selectedSpillCount > 0) {
+        const LiveTensorList passiveActivations = getPassiveActivations(op);
+
+        llvm::SmallVector<mlir::Value> spillCandidates;
+
+        for (const LiveTensorInfo &activation : passiveActivations) {
+          mlir::Operation *producerOp = activation.value.getDefiningOp();
+          if (!producerOp) {
+            continue;
+          }
+
+          auto cachedIt = candidateOutputSizes.find(producerOp);
+          if (cachedIt == candidateOutputSizes.end()) {
+            continue;
+          }
+
+          const bool hasNonZeroL1Option =
+              llvm::any_of(cachedIt->second,
+                          [](const std::optional<uint64_t> &cachedBytes) {
+                            return cachedBytes && *cachedBytes != 0;
+                          });
+
+          if (!hasNonZeroL1Option) {
+            continue;
+          }
+
+          if (!llvm::is_contained(spillCandidates, activation.value)) {
+            spillCandidates.push_back(activation.value);
+          }
+        }
+
+        const size_t spillLimit =
+            std::min(selectedSpillCount, spillCandidates.size());
+
+        for (size_t spillIdx = 0; spillIdx < spillLimit; ++spillIdx) {
+          result.spillRequests.push_back(
+              SpillRequest{spillCandidates[spillIdx], op});
+        }
+      }
+    }
+
     const auto bufferType = bestCandidate.opConfig.outputLayout.getBufferType();
     if (bufferType == BufferType::L1) {
       ++result.numL1Configs;
@@ -343,22 +429,45 @@ ViterbiResult ViterbiPolicy::constructResult(SolverStatus status) const {
     }
   }
 
-  // Use the backtracking seeds to calculate total cost.
-  // TODO: Handle multi-output case for sink ops.
-  // Only considered sink ops
-  for (const auto &[sinkOp, seedIdx] : getBacktrackingSeeds()) {
-    auto selectedIt = optimalCandidateIndex.find(sinkOp);
-    const size_t selectedIdx = selectedIt != optimalCandidateIndex.end()
-                                   ? selectedIt->second
-                                   : seedIdx;
-    const auto &sinkCosts = viterbiTable.lookup(sinkOp);
-    if (selectedIdx >= sinkCosts.size()) {
-      continue;
-    }
+  // The DP table is row-normalized, so sink cost alone no longer
+  // represents the selected path. Sum selected normalized costs for solver
+  // reporting, while preserving the seed fallback for tests or
+  // partial states where no selected assignment exists yet.
+  bool hasSelectedAssignment = false;
+  bool hasFiniteSelectedCost = false;
+  for (const auto &[_, operations] : schedule) {
+    for (mlir::Operation *op : operations) {
+      auto selectedIt = optimalCandidateIndex.find(op);
+      if (selectedIt == optimalCandidateIndex.end()) {
+        continue;
+      }
+      hasSelectedAssignment = true;
 
-    const double sinkCost = sinkCosts[selectedIdx];
-    if (std::isfinite(sinkCost)) {
-      result.totalCost += sinkCost;
+      auto costIt = viterbiTable.find(op);
+      if (costIt == viterbiTable.end()) {
+        continue;
+      }
+
+      const size_t selectedIdx = selectedIt->second;
+      const auto &costs = costIt->second;
+      if (selectedIdx >= costs.size()) {
+        continue;
+      }
+
+      const double selectedCost = costs[selectedIdx];
+      if (std::isfinite(selectedCost)) {
+        result.totalCost += selectedCost;
+        hasFiniteSelectedCost = true;
+      }
+    }
+  }
+
+  if (!hasFiniteSelectedCost && !hasSelectedAssignment) {
+    for (const auto &[sinkOp, seedIdx] : getBacktrackingSeeds()) {
+      const auto &sinkCosts = viterbiTable.lookup(sinkOp);
+      if (seedIdx < sinkCosts.size() && std::isfinite(sinkCosts[seedIdx])) {
+        result.totalCost += sinkCosts[seedIdx];
+      }
     }
   }
 
@@ -475,6 +584,8 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
 
         // Store candidate output size for later use
         storeCandidateOutputSize(op, i, localResult.outputSizeBytes);
+        storeCandidateAdditionalL1Usage(op, i, localResult.additionalL1Usage);
+        storeSelectedSpillCount(op, i, localResult.selectedSpillCount);
 
         // Initialize total cost infinity
         // The total cost will be updated only when we have valid local cost and
@@ -606,12 +717,14 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
         // shard 14x1 valid.
         // If current candidate belong to default group, we don't skip any
         // candidate in here
+        const bool hasCandidateOutputLayout =
+            static_cast<bool>(candidate.opConfig.outputLayout);
         const bool isDefaultGroup =
             optimizer_utils::getLayout(candidate.opConfig.outputLayout) ==
             TensorMemoryLayout::Interleaved;
-        const bool shouldSkipGroup = localResult.skipGroup &&
-                                     candidate.groupIndex.has_value() &&
-                                     !isDefaultGroup;
+        const bool shouldSkipGroup =
+            localResult.skipGroup && candidate.groupIndex.has_value() &&
+            (!hasCandidateOutputLayout || !isDefaultGroup);
         if (!shouldSkipGroup) {
           ++i;
           continue;
@@ -684,6 +797,26 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
           TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer, "  c[{}] = {}",
                        entry.candidateIdx, entry.bytes);
         }
+      }
+
+      double opMinCost = inf;
+
+      for (double cost : viterbiTable[op]) {
+        if (std::isfinite(cost)) {
+          opMinCost = std::min(opMinCost, cost);
+        }
+      }
+
+      if (std::isfinite(opMinCost)) {
+        for (double &cost : viterbiTable[op]) {
+          if (std::isfinite(cost)) {
+            cost -= opMinCost;
+          }
+        }
+
+        TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+                    "DP normalized op={} opMinCost={}",
+                    op->getName().getStringRef(), opMinCost);
       }
 
       // After cost calculation, check if we have at least one finite candidate
@@ -1066,10 +1199,13 @@ SolverStatus ViterbiPolicy::performBacktracking() {
 void ViterbiPolicy::reset() {
   TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
                "Resetting ViterbiPolicy state\n");
+
   viterbiTable.clear();
   backtrackTable.clear();
   optimalCandidateIndex.clear();
   candidateOutputSizes.clear();
+  candidateAdditionalL1Usages.clear();
+  selectedSpillCounts.clear();
 }
 
 // =================================================================
@@ -1332,6 +1468,46 @@ ViterbiPolicy::getPassiveActivations(mlir::Operation *currentOp) const {
   return passiveActivations;
 }
 
+void ViterbiPolicy::storeCandidateAdditionalL1Usage(
+    mlir::Operation *op, size_t candidateIdx, uint64_t additionalL1Usage) {
+  if (!op) {
+    return;
+  }
+
+  auto &storedUsages = candidateAdditionalL1Usages[op];
+  if (storedUsages.size() <= candidateIdx) {
+    storedUsages.resize(candidateIdx + 1, std::nullopt);
+  }
+
+  storedUsages[candidateIdx] = additionalL1Usage;
+}
+
+void ViterbiPolicy::storeSelectedSpillCount(
+    mlir::Operation *op, size_t candidateIdx, size_t selectedSpillCount) {
+  if (!op) {
+    return;
+  }
+
+  auto &spillCounts = selectedSpillCounts[op];
+  if (spillCounts.size() <= candidateIdx) {
+    spillCounts.resize(candidateIdx + 1, 0);
+  }
+
+  spillCounts[candidateIdx] = selectedSpillCount;
+}
+
+std::optional<uint64_t>
+ViterbiPolicy::getCandidateAdditionalL1Usage(
+    mlir::Operation *op, size_t candidateIdx) const {
+  auto usageIt = candidateAdditionalL1Usages.find(op);
+  if (usageIt == candidateAdditionalL1Usages.end() ||
+      candidateIdx >= usageIt->second.size()) {
+    return std::nullopt;
+  }
+
+  return usageIt->second[candidateIdx];
+}
+
 // Find producer operations for the passive activations. These producer ops are
 // used as context for cost model to determine the cost of keeping passive
 // tensors live through the current
@@ -1488,11 +1664,11 @@ double ViterbiPolicy::getBestTransitionCost(
     mlir::Operation *currentOp, const OpConfigCandidate &currentCandidate,
     uint64_t additionalL1Usage) const {
   double transitionCost = inf;
+
   const llvm::SmallVector<mlir::Value> parentOperands =
       getParentOperandsForTransition(currentOp, parentOp);
 
-  // Feed required information to the cost model
-  for (mlir::Value parentOperand : parentOperands) {
+  auto getEdgeCost = [&](mlir::Value parentOperand) {
     CostModel::TransitionEdgeCostInput transitionInput;
     transitionInput.producerOp = parentOp;
     transitionInput.consumerOp = currentOp;
@@ -1502,9 +1678,24 @@ double ViterbiPolicy::getBestTransitionCost(
     transitionInput.opConfigMap = nullptr;
     transitionInput.additionalL1Usage = additionalL1Usage;
 
-    const double edgeCost = costModel->getTransitionCost(transitionInput);
-    if (edgeCost < transitionCost) {
-      transitionCost = edgeCost;
+    return costModel->getTransitionCost(transitionInput);
+  };
+
+  if (parentOperands.size() == 1) {
+    return getEdgeCost(parentOperands.front());
+  }
+
+  if (parentOperands.size() > 1) {
+    transitionCost = 0.0;
+
+    for (mlir::Value parentOperand : parentOperands) {
+      const double edgeCost = getEdgeCost(parentOperand);
+
+      if (!std::isfinite(edgeCost)) {
+        return inf;
+      }
+
+      transitionCost += edgeCost;
     }
   }
 
@@ -1634,7 +1825,9 @@ std::optional<size_t> ViterbiPolicy::resolveParentCandConflict(
         const double transitionCost = getBestTransitionCost(
             parentOp, parentCandidates[parentCandIdx], request.currentOp,
             currentCandidatesIt->second[request.selectedCurrentCandIdx],
-            /*additionalL1Usage=*/0);
+            getCandidateAdditionalL1Usage(request.currentOp,
+                                          request.selectedCurrentCandIdx)
+                .value_or(0));
 
         // Guard check against invalid transition cost to avoid selecting
         // invalid parent candidates

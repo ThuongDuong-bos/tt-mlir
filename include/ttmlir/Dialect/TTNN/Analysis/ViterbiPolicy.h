@@ -132,6 +132,14 @@ private:
   getOpParents(mlir::Operation *currentOp) const;
   void storeCandidateOutputSize(mlir::Operation *op, size_t candidateIdx,
                                 std::optional<uint64_t> outputSizeBytes);
+  void storeCandidateAdditionalL1Usage(mlir::Operation *op,
+                                     size_t candidateIdx,
+                                     uint64_t additionalL1Usage);
+  void storeSelectedSpillCount(mlir::Operation *op, size_t candidateIdx,
+                              size_t selectedSpillCount);
+  std::optional<uint64_t>
+  getCandidateAdditionalL1Usage(mlir::Operation *op,
+                                size_t candidateIdx) const;
   LiveTensorList getPassiveActivations(mlir::Operation *currentOp) const;
   llvm::SmallVector<mlir::Operation *>
   getPassiveTensorProducers(const LiveTensorList &passiveActivations) const;
@@ -168,6 +176,10 @@ private:
   llvm::DenseMap<mlir::Operation *, size_t> optimalCandidateIndex;
   llvm::DenseMap<mlir::Operation *, llvm::SmallVector<std::optional<uint64_t>>>
       candidateOutputSizes; // Store output bytes for each op candidate
+  llvm::DenseMap<mlir::Operation *, llvm::SmallVector<std::optional<uint64_t>>>
+    candidateAdditionalL1Usages;
+  llvm::DenseMap<mlir::Operation *, llvm::SmallVector<size_t>>
+      selectedSpillCounts;
 
   // Tensor lifetime map
   TensorLifetimeMap tensorLifetimes;

@@ -23,7 +23,7 @@
 namespace mlir::tt::ttnn {
 
 struct EmissionCostParams {
-  double wCore = 1.0;
+  double wCore = 0.0167;  // 1.0 / 6.0;
   double wRisk = 10.0;
   double wCb = 25.0;
   double wBuf = 1.0;
@@ -60,11 +60,18 @@ public:
 
   struct LocalCostResult {
     double cost = 0.0;
+    /// true means "skip remaining candidates in this layout group".
+    /// This is set only for non-OOM validation failures on grouped candidates.
     bool skipGroup = false;
+    /// Cached bytes for later passive/spill accounting when requested by
+    /// caller.
     std::optional<uint64_t> outputSizeBytes;
 
-    // Per-core L1 occupied by currently live passive tensors.
+    /// Additional per-core L1 memory already occupied by live passive tensors
     uint64_t additionalL1Usage = 0;
+    /// Number of passive producers selected to spill to DRAM for this
+    /// candidate.
+    size_t selectedSpillCount = 0;
   };
 
   struct TransitionEdgeCostInput {

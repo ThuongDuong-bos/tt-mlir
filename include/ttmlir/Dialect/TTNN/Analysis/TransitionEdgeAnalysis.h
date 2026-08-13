@@ -14,10 +14,20 @@
 
 namespace mlir::tt::ttnn::analysis {
 
+enum class TransitionOpIndex {
+  ToLayout,
+  Typecast,
+  Reshape,
+  Permute,
+  Pad,
+  Unknown,
+};
+
 struct TransitionOpInfo {
   llvm::StringRef opName;
   TTNNLayoutAttr inputLayout;
   TTNNLayoutAttr outputLayout;
+  TransitionOpIndex opIndex = TransitionOpIndex::Unknown;
 };
 
 // Input to transition builder.
@@ -25,6 +35,11 @@ struct GetTransitionOpsInput {
   Value consumerOperand;
   TTNNLayoutAttr producerOutputLayout;
   TTNNLayoutAttr consumerInputLayout;
+};
+
+struct GetTransitionOpsResult {
+  bool isSuccess = false;
+  llvm::SmallVector<TransitionOpInfo> transitionOps;
 };
 
 // Describes a layout transition for one concrete SSA use. The exact producer
@@ -56,6 +71,13 @@ public:
     return transitionEdges;
   }
 
+  GetTransitionOpsResult
+  getTransitionOps(Operation *producerOp, Value consumerOperand,
+                  Operation *consumerOp,
+                  TTNNLayoutAttr producerOutputLayout,
+                  TTNNLayoutAttr consumerInputLayout,
+                  uint64_t additionalL1Usage = 0) const;
+
 private:
   const DenseMap<Operation *, OpConfig> &opConfigMap;
   const DenseMap<Operation *, llvm::SmallVector<TTNNLayoutAttr>>
@@ -81,10 +103,6 @@ private:
 
   // Collect existing layout transition ops.
   llvm::SmallVector<TransitionOpInfo> collectExistingOps(Value v) const;
-
-  // Describe transition sequence (analysis only).
-  llvm::SmallVector<TransitionOpInfo>
-  getTransitionOps(const GetTransitionOpsInput &input) const;
 
   // Resolve the exact producer Value and the layout currently seen by the
   // consumer.
