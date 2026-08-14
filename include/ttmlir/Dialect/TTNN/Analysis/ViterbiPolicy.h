@@ -27,13 +27,19 @@ using OperationSchedule =
 
 enum class SolverStatus {
   Success,
+
+  /// Input / DP construction state
   MissingCandidateState,
   NoValidGlobalPath,
+
+  /// Backtracking state
   NoValidSeed,
   InvalidBacktrackState,
   InvalidCandidateSelection,
   InvalidTransitionState,
   ConflictUnresolved,
+
+  /// Final result validation
   PartialAssignment,
 };
 
@@ -45,8 +51,7 @@ struct SpillRequest {
   mlir::Operation *triggerOp = nullptr;
 };
 
-// Contains the selected configuration, input layouts, and memory-management
-// requests produced by ViterbiPolicy.
+/// Returned by ViterbiPolicy after execution
 struct ViterbiResult {
   llvm::DenseMap<mlir::Operation *, OpConfig> optimalConfigurations;
   llvm::DenseMap<mlir::Operation *, llvm::SmallVector<TTNNLayoutAttr>>
@@ -54,7 +59,9 @@ struct ViterbiResult {
   llvm::SmallVector<SpillRequest> spillRequests;
   SolverStatus status = SolverStatus::Success;
   double totalCost = 0.0;
+  /// How many ops got L1 placement
   std::size_t numL1Configs = 0;
+  /// How many ops DRAM spilled
   std::size_t numDRAMConfigs = 0;
 };
 
@@ -84,8 +91,12 @@ public:
                 const OperationSchedule &schedule,
                 PrunedGraphInfo prunedGraphInfo = PrunedGraphInfo());
 
+  /// Main workflow
   ViterbiResult run();
+  /// Core Viterbi algorithm
   ViterbiResult solve();
+
+  /// Configuratioln and status
   void reset();
 
 private:
@@ -95,6 +106,7 @@ private:
     std::size_t expectedParentCandIdx = 0;
   };
 
+  /// Main algorithm phases
   SolverStatus buildViterbiTable();
   SolverStatus performCostCalculation();
   SolverStatus performBacktracking();
@@ -116,6 +128,7 @@ private:
   resolveParentCandConflict(mlir::Operation *parentOp,
                             llvm::ArrayRef<ParentCandRequest> requests) const;
 
+  /// Tensor lifetime analysis
   void calculateTensorLifetimes(const OperationSchedule &schedule);
 
   const TensorLifetimeMap &getTensorLifetimes() const {
@@ -159,17 +172,21 @@ private:
   std::optional<LiveTensorInfo> getActivationInfo(mlir::Operation *currentOp,
                                                   mlir::Value value) const;
 
+  /// Checker
   bool isJoinOperation(mlir::Operation *op) const;
 
+  /// Debug and logging helpers
   void printOptimalPath() const;
   void printActivation(mlir::Operation *currentOp, mlir::Value value,
                        LiveTensorList &activations,
                        bool requireRepresentativeMatch = false) const;
 
+  /// Provided data for baseline
   OpCandidateBuilderResult candidateResult;
   OperationSchedule schedule;
   std::shared_ptr<CostModel> costModel;
 
+  /// Algorithm state
   llvm::DenseMap<mlir::Operation *, llvm::SmallVector<double>> viterbiTable;
   llvm::DenseMap<mlir::Operation *, llvm::SmallVector<llvm::SmallVector<int>>>
       backtrackTable;
@@ -181,6 +198,7 @@ private:
   llvm::DenseMap<mlir::Operation *, llvm::SmallVector<std::size_t>>
       selectedSpillCounts;
 
+  /// Tensor lifetime map
   TensorLifetimeMap tensorLifetimes;
   PrunedGraphInfo prunedGraphInfo;
 };

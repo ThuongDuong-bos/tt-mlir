@@ -31,27 +31,21 @@ static TransitionOpIndex getTransitionOpIndex(Operation *op) {
   if (!op) {
     return TransitionOpIndex::Unknown;
   }
-
   if (isa<ToLayoutOp>(op)) {
     return TransitionOpIndex::ToLayout;
   }
-
   if (isa<TypecastOp>(op)) {
     return TransitionOpIndex::Typecast;
   }
-
   if (isa<ReshapeOp>(op)) {
     return TransitionOpIndex::Reshape;
   }
-
   if (isa<PermuteOp>(op)) {
     return TransitionOpIndex::Permute;
   }
-
   if (isa<PadOp>(op)) {
     return TransitionOpIndex::Pad;
   }
-
   return TransitionOpIndex::Unknown;
 }
 
@@ -64,14 +58,10 @@ static bool isConversionOp(Operation *op) {
              PadOp, TypecastOp>(op);
 }
 
-// The current uplift only explicitly supports Q/K/V-style multi-result
-// producers. Keep this local until a shared non-BOS utility provides the same
-// rule.
 static bool isQKVHeadsOp(Operation *op) {
   if (!op) {
     return false;
   }
-
   const StringRef opName = op->getName().getStringRef();
 
   return opName == "ttnn.split_query_key_value_and_split_heads" ||
@@ -360,8 +350,6 @@ GetTransitionOpsResult TransitionEdgeAnalysis::getTransitionOps(
     return {false, {}};
   }
 
-  // Q/K/V operations can expose result-specific layouts through the exact SSA
-  // result type. Prefer that encoding when available.
   if (producerOp && producerOp->getNumResults() > 1 &&
       isQKVHeadsOp(producerOp)) {
     Value currentValue = consumerOperand;
@@ -574,9 +562,6 @@ void TransitionEdgeAnalysis::resolveOpLayouts() {
         for (OpResult result : op->getResults()) {
           TTNNLayoutAttr layout = config.outputLayout;
 
-          // Preserve exact SSA result identity. The current OpConfig still
-          // stores a single selected output layout, so supported Q/K/V
-          // multi-result ops initially share that selected layout.
           if (!layout) {
             if (auto tensorType =
                     dyn_cast<RankedTensorType>(result.getType())) {
@@ -667,7 +652,6 @@ void TransitionEdgeAnalysis::emitEdges() {
           continue;
         }
 
-        // Deduplicate by exact SSA use, not by producer operation.
         if (!emittedUses.insert(&consumerUse).second) {
           continue;
         }

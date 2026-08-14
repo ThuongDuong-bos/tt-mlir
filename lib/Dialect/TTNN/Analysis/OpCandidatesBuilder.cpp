@@ -25,6 +25,7 @@ struct GroupState {
   llvm::SmallVector<TTNNLayoutAttr> keptDefaults;
 };
 
+// Group emission order: tiled first, then row-major.
 static constexpr std::array<CandidateGroup, 3> kTileGroups = {
     CandidateGroup::TileHeight, CandidateGroup::TileBlock,
     CandidateGroup::TileWidth};

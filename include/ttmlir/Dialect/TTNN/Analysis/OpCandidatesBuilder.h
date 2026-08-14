@@ -2,7 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#pragma once
+#ifndef TTMLIR_DIALECT_TTNN_ANALYSIS_OPCANDIDATEBUILDER_H
+#define TTMLIR_DIALECT_TTNN_ANALYSIS_OPCANDIDATEBUILDER_H
 
 #include "ttmlir/Dialect/TTNN/Analysis/OpConfig.h"
 #include "ttmlir/Dialect/TTNN/Analysis/TensorLayouts.h"
@@ -20,6 +21,7 @@
 
 namespace mlir::tt::ttnn {
 
+/// Coarse layout family used during candidate grouping.
 enum class LayoutFamily : uint8_t {
   TileHeight,
   TileBlock,
@@ -29,6 +31,7 @@ enum class LayoutFamily : uint8_t {
   RowMajorWidth,
 };
 
+/// Emission/processing groups assigned to candidates.
 enum class CandidateGroup : uint8_t {
   DefaultDRAM,
   DefaultL1,
@@ -64,6 +67,12 @@ class OpCandidatesBuilder {
 public:
   OpCandidatesBuilder() = default;
 
+  /// Build candidates over the full schedule.
+  ///
+  /// Return value:
+  ///   true  -> getFullCandidates() is usable by downstream selection.
+  ///   false -> candidate generation hit a fatal status and the caller should
+  ///            fall back to default OpConfigAnalysis.
   void buildFullCandidates(
       const TensorTypeLayoutsMap &tensorTypePossibleLayouts,
       const llvm::DenseMap<mlir::func::FuncOp,
@@ -71,6 +80,12 @@ public:
       const llvm::DenseMap<mlir::Operation *, std::vector<OpConfig>>
           &legalOpConfigs);
 
+  /// Build candidates over the pruned schedule.
+  ///
+  /// Return value:
+  ///   true  -> getPrunedCandidates() is usable by Viterbi.
+  ///   false -> candidate generation hit a fatal status and the caller should
+  ///            fall back to default OpConfigAnalysis.
   void buildPrunedCandidates(
       const TensorTypeLayoutsMap &tensorTypePossibleLayouts,
       const llvm::DenseMap<mlir::func::FuncOp,
@@ -107,3 +122,5 @@ private:
 };
 
 } // namespace mlir::tt::ttnn
+
+#endif // TTMLIR_DIALECT_TTNN_ANALYSIS_OPCANDIDATEBUILDER_H

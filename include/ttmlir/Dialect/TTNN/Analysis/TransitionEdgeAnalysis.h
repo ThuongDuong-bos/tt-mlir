@@ -31,6 +31,7 @@ enum class TransitionOpIndex {
   Unknown,
 };
 
+/// Extra info for identifies conversion sequences.
 struct TransitionOpInfo {
   llvm::StringRef opName;
   TTNNLayoutAttr inputLayout;
@@ -38,19 +39,20 @@ struct TransitionOpInfo {
   TransitionOpIndex opIndex = TransitionOpIndex::Unknown;
 };
 
+/// TransitionOpInfo list with a boolean flag.
 struct GetTransitionOpsResult {
   bool isSuccess = false;
   llvm::SmallVector<TransitionOpInfo> transitionOps;
 };
 
-// Describes a layout transition for one exact SSA use so multi-result producer
-// identity is preserved throughout analysis and materialization.
 struct TransitionEdge {
   Value producerValue;
   Operation *consumerOp = nullptr;
   unsigned consumerOperandIndex = 0;
   TTNNLayoutAttr producerLayout;
   TTNNLayoutAttr consumerLayout;
+
+  /// Planned transition ops from producer to consumer.
   llvm::SmallVector<TransitionOpInfo> transitionOps;
 };
 
@@ -71,7 +73,7 @@ public:
     return transitionEdges;
   }
 
-  // Build and validate the transition sequence for one producer-consumer use.
+  /// Get transition ops from producerOp to consumerOp.
   GetTransitionOpsResult getTransitionOps(Operation *producerOp,
                                           Value consumerOperand,
                                           Operation *consumerOp,
@@ -80,13 +82,24 @@ public:
                                           uint64_t additionalL1Usage) const;
 
 private:
+  /// Assign a concrete TTNNLayoutAttr to every Value in the graph
+  /// and store it in valueLayoutMap.
   void resolveOpLayouts();
+
+  /// Identify edges where:
+  /// producer layout != expected layout
   void emitEdges();
+
+  /// Ensure that all generated TransitionEdge entries are valid
+  /// from an analysis perspective.
+  /// Only validate internally consistent, not the execution valid.
   LogicalResult validateTransitions();
 
+  /// Return required layout for a given op input (if any)
   std::optional<TTNNLayoutAttr> getRequiredLayout(Operation *op,
                                                   unsigned operandIndex) const;
 
+  /// Return the producer op and its output layout for a given value.
   std::optional<std::pair<Value, TTNNLayoutAttr>>
   resolveProducerAndLayout(Value value);
 

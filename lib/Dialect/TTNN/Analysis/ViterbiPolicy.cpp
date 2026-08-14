@@ -95,8 +95,12 @@ const char *getSolverStatusString(SolverStatus status) {
 
 bool isSolverOk(SolverStatus status) { return status == SolverStatus::Success; }
 
-// Construct the policy from precomputed candidates and the selected schedule.
-// Pruned graph metadata preserves representative SSA values across conversions.
+// Constructor for BOS Optimizer Pass.
+// Inputs:
+//  - candidateResult: Precomputed op candidates from OpCandidatesBuilder
+//  - schedule: Operation schedule (full or pruned)
+//  - prunedGraphInfo: Optional pruned graph metadata used for representative
+//    value mapping
 ViterbiPolicy::ViterbiPolicy(const OpCandidateBuilderResult &candidateResult,
                              const OperationSchedule &schedule,
                              PrunedGraphInfo prunedGraphInfo)
@@ -731,6 +735,7 @@ std::optional<std::size_t> ViterbiPolicy::resolveParentCandConflict(
   return resolvedCandIdx;
 }
 
+// Create Viterbi DP table (N x T) based on candidate configurations and costs
 SolverStatus ViterbiPolicy::buildViterbiTable() {
   TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
                "Building Viterbi tables");
@@ -882,6 +887,7 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
             for (std::size_t parentCandidateIndex = 0;
                  parentCandidateIndex < parentCandidateCount;
                  ++parentCandidateIndex) {
+              // Skip parent's invalid candidates
               if (!std::isfinite(parentDp[parentCandidateIndex])) {
                 continue;
               }
@@ -890,6 +896,7 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
                   parentOp, parentCandidates[parentCandidateIndex], op,
                   candidate, localResult.additionalL1Usage);
 
+              // Only assign best parent cost
               const double parentCandidateCost =
                   parentDp[parentCandidateIndex] + bestEdgeCost;
               if (parentCandidateCost < bestParentCost) {
@@ -906,6 +913,8 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
               }
             }
 
+            // Guard against no valid path from parent candidate to current
+            // candidate
             if (!std::isfinite(bestParentCost)) {
               TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
                            "DP op={} candidate={} -> inf: no finite path from "
@@ -916,10 +925,14 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
               break;
             }
 
+            // Accumulate parent cost sum and record best parent candidate index
+            // for backtracking
             parentCostSum += bestParentCost;
             bestPrevIdxByParent[parentIdx] = bestParentIdx;
           }
 
+          // If we have valid paths from all parents, then we can update the
+          // total cost for current candidate
           if (parentPathValid) {
             totalCost = localResult.cost + parentCostSum;
           } else {
@@ -932,8 +945,8 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
                        op->getName().getStringRef(), candidateIndex);
         }
 
-        // Store the Viterbi recurrence and its minimizing parent candidate
-        // for every parent edge.
+        // dp[u][i] = local[u][i] + sum_p min_j(dp[p][j] + t(p_j -> u_i))
+        // backtrackTable[u][i][p] = argmin_j(dp[p][j] + t(p_j -> u_i))
         viterbiTable[op][candidateIndex] = totalCost;
         backtrackTable[op][candidateIndex] = bestPrevIdxByParent;
         TTMLIR_DEBUG(
@@ -1085,6 +1098,7 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
   return status;
 }
 
+// Backtracking to find optimal layout for each operation
 SolverStatus ViterbiPolicy::performBacktracking() {
   TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
                "Performing backtracking to find optimal layout configurations");
@@ -1812,7 +1826,8 @@ ViterbiResult ViterbiPolicy::solve() {
     }
   }
 
-  // Report the first failed solver stage on one scheduled operation.
+  // If any stage of the solver failed, we log the failure and emit a warning on
+  // one of the operations.
   if (!isSolverOk(status)) {
     for (const auto &[_, operations] : schedule) {
       if (!operations.empty()) {
@@ -1825,7 +1840,8 @@ ViterbiResult ViterbiPolicy::solve() {
 
     result.status = status;
   } else {
-    // Construct and report the selected path after all solver stages succeed.
+    // If the solver is successful, we can construct the result with the optimal
+    // path and its cost.
     result = constructResult(status);
 
     printOptimalPath();
