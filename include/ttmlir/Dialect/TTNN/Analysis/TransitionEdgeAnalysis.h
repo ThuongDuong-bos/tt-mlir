@@ -1,16 +1,24 @@
+// SPDX-FileCopyrightText: (c) 2026 BOS Semiconductors
+//
+// SPDX-License-Identifier: Apache-2.0
+
 #ifndef TTMLIR_DIALECT_TTNN_ANALYSIS_TRANSITIONEDGEANALYSIS_H
 #define TTMLIR_DIALECT_TTNN_ANALYSIS_TRANSITIONEDGEANALYSIS_H
+
+#include "ttmlir/Dialect/TTNN/Analysis/OpConfig.h"
+#include "ttmlir/Dialect/TTNN/IR/TTNNOpsAttrs.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
-#include "ttmlir/Dialect/TTNN/Analysis/OpConfig.h"
-#include "ttmlir/Dialect/TTNN/IR/TTNNOpsAttrs.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 
+#include <cstdint>
 #include <optional>
+#include <utility>
 
 namespace mlir::tt::ttnn::analysis {
 
@@ -30,38 +38,30 @@ struct TransitionOpInfo {
   TransitionOpIndex opIndex = TransitionOpIndex::Unknown;
 };
 
-// Input to transition builder.
-struct GetTransitionOpsInput {
-  Value consumerOperand;
-  TTNNLayoutAttr producerOutputLayout;
-  TTNNLayoutAttr consumerInputLayout;
-};
-
 struct GetTransitionOpsResult {
   bool isSuccess = false;
   llvm::SmallVector<TransitionOpInfo> transitionOps;
 };
 
-// Describes a layout transition for one concrete SSA use. The exact producer
-// Value is preserved instead of reconstructing it from a synthetic Edge.
+// Describes a layout transition for one exact SSA use so multi-result producer
+// identity is preserved throughout analysis and materialization.
 struct TransitionEdge {
   Value producerValue;
-  Operation *consumerOp;
-  unsigned consumerOperandIndex;
-
+  Operation *consumerOp = nullptr;
+  unsigned consumerOperandIndex = 0;
   TTNNLayoutAttr producerLayout;
   TTNNLayoutAttr consumerLayout;
-
   llvm::SmallVector<TransitionOpInfo> transitionOps;
 };
 
 class TransitionEdgeAnalysis {
 public:
   TransitionEdgeAnalysis(
-      const DenseMap<Operation *, OpConfig> &opConfigMap,
-      const DenseMap<Operation *, llvm::SmallVector<TTNNLayoutAttr>>
+      const llvm::DenseMap<Operation *, OpConfig> &opConfigMap,
+      const llvm::DenseMap<Operation *, llvm::SmallVector<TTNNLayoutAttr>>
           &inputLayoutsMap,
-      const DenseMap<func::FuncOp, llvm::SmallVector<Operation *>> &opSchedule)
+      const llvm::DenseMap<func::FuncOp, llvm::SmallVector<Operation *>>
+          &opSchedule)
       : opConfigMap(opConfigMap), inputLayoutsMap(inputLayoutsMap),
         opSchedule(opSchedule) {}
 
@@ -71,44 +71,34 @@ public:
     return transitionEdges;
   }
 
-  GetTransitionOpsResult
-  getTransitionOps(Operation *producerOp, Value consumerOperand,
-                  Operation *consumerOp,
-                  TTNNLayoutAttr producerOutputLayout,
-                  TTNNLayoutAttr consumerInputLayout,
-                  uint64_t additionalL1Usage = 0) const;
+  // Build and validate the transition sequence for one producer-consumer use.
+  GetTransitionOpsResult getTransitionOps(Operation *producerOp,
+                                          Value consumerOperand,
+                                          Operation *consumerOp,
+                                          TTNNLayoutAttr producerOutputLayout,
+                                          TTNNLayoutAttr consumerInputLayout,
+                                          uint64_t additionalL1Usage) const;
 
 private:
-  const DenseMap<Operation *, OpConfig> &opConfigMap;
-  const DenseMap<Operation *, llvm::SmallVector<TTNNLayoutAttr>>
-      &inputLayoutsMap;
-  const DenseMap<mlir::func::FuncOp, llvm::SmallVector<Operation *>>
-      &opSchedule;
-
-  llvm::SmallVector<TransitionEdge> transitionEdges;
-
-  DenseMap<Value, TTNNLayoutAttr> valueLayoutMap;
-  llvm::DenseSet<OpOperand *> emittedUses;
-
-  // Phases.
   void resolveOpLayouts();
   void emitEdges();
   LogicalResult validateTransitions();
 
-  // Helpers.
-
-  // Return required layout for a given op input, if any.
-  std::optional<TTNNLayoutAttr> getRequiredLayout(mlir::Operation *op,
+  std::optional<TTNNLayoutAttr> getRequiredLayout(Operation *op,
                                                   unsigned operandIndex) const;
 
-  // Collect existing layout transition ops.
-  llvm::SmallVector<TransitionOpInfo> collectExistingOps(Value v) const;
-
-  // Resolve the exact producer Value and the layout currently seen by the
-  // consumer.
   std::optional<std::pair<Value, TTNNLayoutAttr>>
   resolveProducerAndLayout(Value value);
 
+  const llvm::DenseMap<Operation *, OpConfig> &opConfigMap;
+  const llvm::DenseMap<Operation *, llvm::SmallVector<TTNNLayoutAttr>>
+      &inputLayoutsMap;
+  const llvm::DenseMap<func::FuncOp, llvm::SmallVector<Operation *>>
+      &opSchedule;
+
+  llvm::SmallVector<TransitionEdge> transitionEdges;
+  llvm::DenseMap<Value, TTNNLayoutAttr> valueLayoutMap;
+  llvm::DenseSet<OpOperand *> emittedUses;
 };
 
 } // namespace mlir::tt::ttnn::analysis

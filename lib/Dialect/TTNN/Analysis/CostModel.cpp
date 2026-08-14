@@ -4,12 +4,12 @@
 
 #include "ttmlir/Dialect/TTNN/Analysis/CostModel.h"
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "ttmlir/Dialect/TTNN/Analysis/TransitionEdgeAnalysis.h"
 #include "ttmlir/Dialect/TTNN/Utils/OptimizerUtils.h"
 #include "ttmlir/Dialect/TTNN/Utils/Utils.h"
 #include "ttmlir/Support/Logger.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/STLExtras.h"
 
 #include <algorithm>
@@ -52,14 +52,14 @@ double computeL1Utility(
 
 struct HeapEntry {
   uint64_t totalBytes = 0;
-  llvm::SmallVector<size_t> indices;
+  llvm::SmallVector<std::size_t> indices;
 };
 
-std::string buildCombinationKey(llvm::ArrayRef<size_t> indices) {
+std::string buildCombinationKey(llvm::ArrayRef<std::size_t> indices) {
   std::string key;
   key.reserve(indices.size() * 4);
 
-  for (size_t index : indices) {
+  for (std::size_t index : indices) {
     key.append(std::to_string(index));
     key.push_back('#');
   }
@@ -69,10 +69,10 @@ std::string buildCombinationKey(llvm::ArrayRef<size_t> indices) {
 
 uint64_t
 computeSelectedSpillBytes(const CostModel::PassiveTensorList &passiveTensorList,
-                          size_t selectedSpillCount) {
+                          std::size_t selectedSpillCount) {
   uint64_t selectedSpillBytes = 0;
 
-  for (size_t spillIdx = 0;
+  for (std::size_t spillIdx = 0;
        spillIdx < selectedSpillCount && spillIdx < passiveTensorList.size();
        ++spillIdx) {
     if (passiveTensorList[spillIdx].empty()) {
@@ -204,98 +204,210 @@ CostModel::CostModel(EmissionCostParams emissionParams,
     : emissionCostParams(std::move(emissionParams)),
       transitionCostParams(std::move(transitionParams)) {}
 
-CostModel::LocalCostResult CostModel::getLocalCost(
-    mlir::Operation *op, const OpConfigCandidate &candidate,
-    llvm::ArrayRef<mlir::Operation *> passiveTensorProducers,
-    bool shouldComputeOutputSize,
-    const CandidateOutputSizesMap &storedCandidateOutputSizes) const {
-  LocalCostResult result;
-  result.cost = inf;
+uint64_t CostModel::getTensorTotalSize(uint64_t outputTensorUsagePerCore,
+                                       TTNNLayoutAttr outputLayout) const {
+  const uint64_t numCores =
+      static_cast<uint64_t>(ttmlir::utils::volume(outputLayout.getGridShape()));
 
-  if (!op || !candidate.opConfig.outputLayout) {
-    return result;
-  }
-
-  uint64_t selectedAdditionalL1Usage = 0;
-  size_t selectedSpillCount = 0;
-
-  const PassiveTensorList passiveTensorList =
-      collectPassiveTensor(passiveTensorProducers, storedCandidateOutputSizes);
-
-  const op_constraint_validation::ValidationResult validationResult =
-      validateOpConfig(op, candidate, passiveTensorList,
-                       selectedAdditionalL1Usage, selectedSpillCount);
-
-  const uint64_t selectedSpillBytes =
-      computeSelectedSpillBytes(passiveTensorList, selectedSpillCount);
-
-  std::optional<uint64_t> outputSize;
-
-  if (shouldComputeOutputSize) {
-    outputSize =
-        computeOutputSize(candidate.opConfig.outputLayout, validationResult);
-  }
-
-  if (!validationResult.isSuccess()) {
-    const bool isOOM =
-        validationResult.status ==
-        op_constraint_validation::ValidationStatus::OutOfMemoryError;
-
-    result.skipGroup = !isOOM && candidate.groupIndex.has_value();
-
-    result.outputSizeBytes = outputSize;
-    result.additionalL1Usage = selectedAdditionalL1Usage;
-    result.selectedSpillCount = selectedSpillCount;
-
-    TTMLIR_DEBUG(
-        ttmlir::LogComponent::ViterbiOptimizer,
-        "Candidate invalid: op={} outputLayout={} status={} error={} "
-        "additionalL1Usage={} selectedSpillCount={} skipGroup={}",
-        op->getName().getStringRef(),
-        optimizer_utils::layoutToString(candidate.opConfig.outputLayout),
-        op_constraint_validation::validationStatusToString(
-            validationResult.status),
-        validationResult.errorMessage.empty() ? std::string("<none>")
-                                              : validationResult.errorMessage,
-        selectedAdditionalL1Usage, selectedSpillCount, result.skipGroup);
-
-    return result;
-  }
-
-  const double emission = getEmissionCost(op, candidate, validationResult,
-                                          selectedAdditionalL1Usage);
-
-  const double spillCost =
-      computeSpillCost(selectedSpillBytes, candidate.opConfig.outputLayout, op);
-
-  result.cost = emission + spillCost;
-  result.skipGroup = false;
-  result.outputSizeBytes = outputSize;
-  result.additionalL1Usage = selectedAdditionalL1Usage;
-  result.selectedSpillCount = selectedSpillCount;
-
-  TTMLIR_DEBUG(
-      ttmlir::LogComponent::ViterbiOptimizer,
-      "Candidate cost: op={} inputLayouts={} outputLayout={} "
-      "cost={} emission={} spill={} "
-      "cbPeak={} l1BuffersPeak={} outputL1PerCore={} "
-      "overallPeak={} additionalL1={} spillCount={} utility={}",
-      op->getName().getStringRef(),
-      optimizer_utils::layoutsToString(std::vector<TTNNLayoutAttr>(
-          candidate.inputLayouts.begin(), candidate.inputLayouts.end())),
-      optimizer_utils::layoutToString(candidate.opConfig.outputLayout),
-      result.cost, emission, spillCost, validationResult.cbPeakUsage,
-      validationResult.l1BuffersPeakUsage, validationResult.outputL1Usage,
-      validationResult.overallPeakL1Usage, selectedAdditionalL1Usage,
-      selectedSpillCount,
-      computeL1Utility(op, validationResult, selectedAdditionalL1Usage));
-
-  return result;
+  return numCores * outputTensorUsagePerCore;
 }
 
-double
-CostModel::getTransitionCost(const TransitionEdgeCostInput &input) const {
-  return calculateTransition(input);
+double CostModel::getLayoutCores(TTNNLayoutAttr layout) const {
+  if (!layout) {
+    return 1.0;
+  }
+
+  const uint64_t coreUsage =
+      static_cast<uint64_t>(ttmlir::utils::volume(layout.getGridShape()));
+
+  return static_cast<double>(std::max<uint64_t>(uint64_t{1}, coreUsage));
+}
+
+CostModel::PassiveTensorList CostModel::collectPassiveTensor(
+    llvm::ArrayRef<mlir::Operation *> passiveTensorProducers,
+    const CandidateOutputSizesMap &storedCandidateOutputSizes) const {
+  PassiveTensorList passiveTensorList;
+
+  passiveTensorList.reserve(passiveTensorProducers.size());
+
+  for (mlir::Operation *passiveProducerOp : passiveTensorProducers) {
+    const auto cacheIt = storedCandidateOutputSizes.find(passiveProducerOp);
+
+    if (cacheIt == storedCandidateOutputSizes.end()) {
+      continue;
+    }
+
+    CandidateSizeList candidateSizes;
+
+    candidateSizes.reserve(cacheIt->second.size());
+
+    for (const std::optional<uint64_t> &cachedBytes : cacheIt->second) {
+      if (!cachedBytes || *cachedBytes == 0) {
+        continue;
+      }
+
+      candidateSizes.push_back(*cachedBytes);
+    }
+
+    if (candidateSizes.empty()) {
+      continue;
+    }
+
+    llvm::sort(candidateSizes,
+               [](uint64_t lhs, uint64_t rhs) { return lhs > rhs; });
+
+    passiveTensorList.push_back(std::move(candidateSizes));
+  }
+
+  return passiveTensorList;
+}
+
+op_constraint_validation::ValidationResult
+CostModel::validateOpConfig(mlir::Operation *op,
+                            const OpConfigCandidate &candidate,
+                            const PassiveTensorList &passiveTensorList,
+                            uint64_t &selectedAdditionalL1Usage,
+                            std::size_t &selectedSpillCount) const {
+  const auto validateForUsage = [&](uint64_t additionalL1Usage) {
+    return op_constraint_validation::validateOperation(
+        op, candidate.inputLayouts, candidate.opConfig, additionalL1Usage);
+  };
+
+  op_constraint_validation::ValidationResult lastOOMResult =
+      op_constraint_validation::ValidationResult::outOfMemoryError(
+          "Passive combinations exhausted");
+
+  op_constraint_validation::ValidationResult result = lastOOMResult;
+
+  if (passiveTensorList.empty()) {
+    selectedAdditionalL1Usage = 0;
+    selectedSpillCount = 0;
+
+    return validateForUsage(
+        /*additionalL1Usage=*/0);
+  }
+
+  bool foundResult = false;
+
+  const uint64_t additionalUsageThreshold =
+      static_cast<uint64_t>(getEffectiveL1CapacityBytes(op));
+
+  const double candidateCores = getLayoutCores(candidate.opConfig.outputLayout);
+
+  const auto toPerCoreAdditionalUsage =
+      [candidateCores](uint64_t totalBytes) -> uint64_t {
+    const double perCore = static_cast<double>(totalBytes) / candidateCores;
+
+    return static_cast<uint64_t>(std::ceil(perCore));
+  };
+
+  const std::size_t passiveCount = passiveTensorList.size();
+
+  const auto getOptionCount = [&](std::size_t dim,
+                                  std::size_t spillCount) -> std::size_t {
+    return dim < spillCount ? std::size_t{1} : passiveTensorList[dim].size();
+  };
+
+  const auto computeTotalBytes = [&](llvm::ArrayRef<std::size_t> indices,
+                                     std::size_t spillCount) -> uint64_t {
+    uint64_t sum = 0;
+
+    for (std::size_t dim = 0; dim < indices.size(); ++dim) {
+      if (dim < spillCount) {
+        continue;
+      }
+
+      sum += passiveTensorList[dim][indices[dim]];
+    }
+
+    return sum;
+  };
+
+  for (std::size_t spillCount = 0; spillCount <= passiveCount && !foundResult;
+       ++spillCount) {
+    auto lessByTotalBytes = [](const HeapEntry &lhs, const HeapEntry &rhs) {
+      return lhs.totalBytes < rhs.totalBytes;
+    };
+
+    const llvm::SmallVector<std::size_t> startIndices(passiveCount, 0);
+
+    std::priority_queue<HeapEntry, std::vector<HeapEntry>,
+                        decltype(lessByTotalBytes)>
+        maxHeap(lessByTotalBytes);
+
+    maxHeap.push(
+        HeapEntry{computeTotalBytes(startIndices, spillCount), startIndices});
+
+    std::unordered_set<std::string> visited;
+
+    visited.insert(buildCombinationKey(startIndices));
+
+    while (!maxHeap.empty() && !foundResult) {
+      const HeapEntry current = maxHeap.top();
+
+      maxHeap.pop();
+
+      selectedAdditionalL1Usage = toPerCoreAdditionalUsage(current.totalBytes);
+
+      selectedSpillCount = spillCount;
+
+      if (selectedAdditionalL1Usage > additionalUsageThreshold) {
+        lastOOMResult =
+            op_constraint_validation::ValidationResult::outOfMemoryError(
+                "Passive additionalL1Usage exceeds threshold");
+      } else {
+        const op_constraint_validation::ValidationResult validationResult =
+            validateForUsage(selectedAdditionalL1Usage);
+
+        if (validationResult.isSuccess()) {
+          result = validationResult;
+          foundResult = true;
+
+          if (selectedSpillCount > 0) {
+            TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+                         "Passive spill required: op={} spillCount={} "
+                         "additionalL1PerCore={} outputLayout={}",
+                         op->getName().getStringRef(), selectedSpillCount,
+                         selectedAdditionalL1Usage,
+                         optimizer_utils::layoutToString(
+                             candidate.opConfig.outputLayout));
+          }
+        } else {
+          foundResult =
+              updateValidationFailure(validationResult, result, lastOOMResult);
+        }
+      }
+
+      if (foundResult) {
+        break;
+      }
+
+      for (std::size_t dim = 0; dim < current.indices.size(); ++dim) {
+        llvm::SmallVector<std::size_t> nextIndices = current.indices;
+
+        ++nextIndices[dim];
+
+        if (nextIndices[dim] >= getOptionCount(dim, spillCount)) {
+          continue;
+        }
+
+        const std::string key = buildCombinationKey(nextIndices);
+
+        if (!visited.insert(key).second) {
+          continue;
+        }
+
+        maxHeap.push(
+            HeapEntry{computeTotalBytes(nextIndices, spillCount), nextIndices});
+      }
+    }
+  }
+
+  if (!foundResult) {
+    result = lastOOMResult;
+  }
+
+  return result;
 }
 
 std::optional<uint64_t> CostModel::computeOutputSize(
@@ -310,13 +422,6 @@ std::optional<uint64_t> CostModel::computeOutputSize(
   }
 
   return getTensorTotalSize(validationResult.outputL1Usage, *outputLayout);
-}
-
-double CostModel::getEmissionCost(
-    mlir::Operation *op, const OpConfigCandidate &candidate,
-    const op_constraint_validation::ValidationResult &validationResult,
-    uint64_t additionalL1Usage) const {
-  return calculateEmission(op, candidate, validationResult, additionalL1Usage);
 }
 
 double CostModel::calculateEmission(
@@ -378,6 +483,13 @@ double CostModel::calculateEmission(
   score += emissionCostParams.wShard * layoutTier;
 
   return score;
+}
+
+double CostModel::getEmissionCost(
+    mlir::Operation *op, const OpConfigCandidate &candidate,
+    const op_constraint_validation::ValidationResult &validationResult,
+    uint64_t additionalL1Usage) const {
+  return calculateEmission(op, candidate, validationResult, additionalL1Usage);
 }
 
 double
@@ -455,6 +567,11 @@ CostModel::calculateTransition(const TransitionEdgeCostInput &input) const {
   return costMap.tMem + costMap.tShape + switchCost;
 }
 
+double
+CostModel::getTransitionCost(const TransitionEdgeCostInput &input) const {
+  return calculateTransition(input);
+}
+
 double CostModel::computeSpillCost(uint64_t selectedSpillBytes,
                                    std::optional<TTNNLayoutAttr> outputLayout,
                                    mlir::Operation *op) const {
@@ -473,205 +590,91 @@ double CostModel::computeSpillCost(uint64_t selectedSpillBytes,
          (static_cast<double>(selectedSpillBytes) / totalCapacity);
 }
 
-uint64_t CostModel::getTensorTotalSize(uint64_t outputTensorUsagePerCore,
-                                       TTNNLayoutAttr outputLayout) const {
-  const uint64_t numCores =
-      static_cast<uint64_t>(ttmlir::utils::volume(outputLayout.getGridShape()));
-
-  return numCores * outputTensorUsagePerCore;
-}
-
-double CostModel::getLayoutCores(TTNNLayoutAttr layout) const {
-  if (!layout) {
-    return 1.0;
-  }
-
-  const uint64_t coreUsage =
-      static_cast<uint64_t>(ttmlir::utils::volume(layout.getGridShape()));
-
-  return static_cast<double>(std::max<uint64_t>(uint64_t{1}, coreUsage));
-}
-
-CostModel::PassiveTensorList CostModel::collectPassiveTensor(
-    llvm::ArrayRef<mlir::Operation *> passiveTensorProducers,
-    const CandidateOutputSizesMap &storedCandidateOutputSizes) const {
-  PassiveTensorList passiveTensorList;
-
-  passiveTensorList.reserve(passiveTensorProducers.size());
-
-  for (mlir::Operation *passiveProducerOp : passiveTensorProducers) {
-    const auto cacheIt = storedCandidateOutputSizes.find(passiveProducerOp);
-
-    if (cacheIt == storedCandidateOutputSizes.end()) {
-      continue;
-    }
-
-    CandidateSizeList candidateSizes;
-
-    candidateSizes.reserve(cacheIt->second.size());
-
-    for (const std::optional<uint64_t> &cachedBytes : cacheIt->second) {
-      if (!cachedBytes || *cachedBytes == 0) {
-        continue;
-      }
-
-      candidateSizes.push_back(*cachedBytes);
-    }
-
-    if (candidateSizes.empty()) {
-      continue;
-    }
-
-    llvm::sort(candidateSizes,
-               [](uint64_t lhs, uint64_t rhs) { return lhs > rhs; });
-
-    passiveTensorList.push_back(std::move(candidateSizes));
-  }
-
-  return passiveTensorList;
-}
-
-op_constraint_validation::ValidationResult CostModel::validateOpConfig(
+CostModel::LocalCostResult CostModel::getLocalCost(
     mlir::Operation *op, const OpConfigCandidate &candidate,
-    const PassiveTensorList &passiveTensorList,
-    uint64_t &selectedAdditionalL1Usage, size_t &selectedSpillCount) const {
-  const auto validateForUsage = [&](uint64_t additionalL1Usage) {
-    return op_constraint_validation::validateOperation(
-        op, candidate.inputLayouts, candidate.opConfig, additionalL1Usage);
-  };
+    llvm::ArrayRef<mlir::Operation *> passiveTensorProducers,
+    bool shouldComputeOutputSize,
+    const CandidateOutputSizesMap &storedCandidateOutputSizes) const {
+  LocalCostResult result;
+  result.cost = inf;
 
-  op_constraint_validation::ValidationResult lastOOMResult =
-      op_constraint_validation::ValidationResult::outOfMemoryError(
-          "Passive combinations exhausted");
-
-  op_constraint_validation::ValidationResult result = lastOOMResult;
-
-  if (passiveTensorList.empty()) {
-    selectedAdditionalL1Usage = 0;
-    selectedSpillCount = 0;
-
-    return validateForUsage(
-        /*additionalL1Usage=*/0);
+  if (!op || !candidate.opConfig.outputLayout) {
+    return result;
   }
 
-  bool foundResult = false;
+  uint64_t selectedAdditionalL1Usage = 0;
+  std::size_t selectedSpillCount = 0;
 
-  const uint64_t additionalUsageThreshold =
-      static_cast<uint64_t>(getEffectiveL1CapacityBytes(op));
+  const PassiveTensorList passiveTensorList =
+      collectPassiveTensor(passiveTensorProducers, storedCandidateOutputSizes);
 
-  const double candidateCores = getLayoutCores(candidate.opConfig.outputLayout);
+  const op_constraint_validation::ValidationResult validationResult =
+      validateOpConfig(op, candidate, passiveTensorList,
+                       selectedAdditionalL1Usage, selectedSpillCount);
 
-  const auto toPerCoreAdditionalUsage =
-      [candidateCores](uint64_t totalBytes) -> uint64_t {
-    const double perCore = static_cast<double>(totalBytes) / candidateCores;
+  const uint64_t selectedSpillBytes =
+      computeSelectedSpillBytes(passiveTensorList, selectedSpillCount);
 
-    return static_cast<uint64_t>(std::ceil(perCore));
-  };
+  std::optional<uint64_t> outputSize;
 
-  const size_t passiveCount = passiveTensorList.size();
-
-  const auto getOptionCount = [&](size_t dim, size_t spillCount) -> size_t {
-    return dim < spillCount ? size_t{1} : passiveTensorList[dim].size();
-  };
-
-  const auto computeTotalBytes = [&](llvm::ArrayRef<size_t> indices,
-                                     size_t spillCount) -> uint64_t {
-    uint64_t sum = 0;
-
-    for (size_t dim = 0; dim < indices.size(); ++dim) {
-      if (dim < spillCount) {
-        continue;
-      }
-
-      sum += passiveTensorList[dim][indices[dim]];
-    }
-
-    return sum;
-  };
-
-  for (size_t spillCount = 0; spillCount <= passiveCount && !foundResult;
-       ++spillCount) {
-    auto lessByTotalBytes = [](const HeapEntry &lhs, const HeapEntry &rhs) {
-      return lhs.totalBytes < rhs.totalBytes;
-    };
-
-    const llvm::SmallVector<size_t> startIndices(passiveCount, 0);
-
-    std::priority_queue<HeapEntry, std::vector<HeapEntry>,
-                        decltype(lessByTotalBytes)>
-        maxHeap(lessByTotalBytes);
-
-    maxHeap.push(
-        HeapEntry{computeTotalBytes(startIndices, spillCount), startIndices});
-
-    std::unordered_set<std::string> visited;
-
-    visited.insert(buildCombinationKey(startIndices));
-
-    while (!maxHeap.empty() && !foundResult) {
-      const HeapEntry current = maxHeap.top();
-
-      maxHeap.pop();
-
-      selectedAdditionalL1Usage = toPerCoreAdditionalUsage(current.totalBytes);
-
-      selectedSpillCount = spillCount;
-
-      if (selectedAdditionalL1Usage > additionalUsageThreshold) {
-        lastOOMResult =
-            op_constraint_validation::ValidationResult::outOfMemoryError(
-                "Passive additionalL1Usage exceeds threshold");
-      } else {
-        const op_constraint_validation::ValidationResult validationResult =
-            validateForUsage(selectedAdditionalL1Usage);
-
-        if (validationResult.isSuccess()) {
-          result = validationResult;
-          foundResult = true;
-
-          if (selectedSpillCount > 0) {
-            TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
-                         "Passive spill required: op={} spillCount={} "
-                         "additionalL1PerCore={} outputLayout={}",
-                         op->getName().getStringRef(), selectedSpillCount,
-                         selectedAdditionalL1Usage,
-                         optimizer_utils::layoutToString(
-                             candidate.opConfig.outputLayout));
-          }
-        } else {
-          foundResult =
-              updateValidationFailure(validationResult, result, lastOOMResult);
-        }
-      }
-
-      if (foundResult) {
-        break;
-      }
-
-      for (size_t dim = 0; dim < current.indices.size(); ++dim) {
-        llvm::SmallVector<size_t> nextIndices = current.indices;
-
-        ++nextIndices[dim];
-
-        if (nextIndices[dim] >= getOptionCount(dim, spillCount)) {
-          continue;
-        }
-
-        const std::string key = buildCombinationKey(nextIndices);
-
-        if (!visited.insert(key).second) {
-          continue;
-        }
-
-        maxHeap.push(
-            HeapEntry{computeTotalBytes(nextIndices, spillCount), nextIndices});
-      }
-    }
+  if (shouldComputeOutputSize) {
+    outputSize =
+        computeOutputSize(candidate.opConfig.outputLayout, validationResult);
   }
 
-  if (!foundResult) {
-    result = lastOOMResult;
+  if (!validationResult.isSuccess()) {
+    const bool isOOM =
+        validationResult.status ==
+        op_constraint_validation::ValidationStatus::OutOfMemoryError;
+
+    result.skipGroup = !isOOM && candidate.groupIndex.has_value();
+
+    result.outputSizeBytes = outputSize;
+    result.additionalL1Usage = selectedAdditionalL1Usage;
+    result.selectedSpillCount = selectedSpillCount;
+
+    TTMLIR_DEBUG(
+        ttmlir::LogComponent::ViterbiOptimizer,
+        "Candidate invalid: op={} outputLayout={} status={} error={} "
+        "additionalL1Usage={} selectedSpillCount={} skipGroup={}",
+        op->getName().getStringRef(),
+        optimizer_utils::layoutToString(candidate.opConfig.outputLayout),
+        op_constraint_validation::validationStatusToString(
+            validationResult.status),
+        validationResult.errorMessage.empty() ? std::string("<none>")
+                                              : validationResult.errorMessage,
+        selectedAdditionalL1Usage, selectedSpillCount, result.skipGroup);
+
+    return result;
   }
+
+  const double emission = getEmissionCost(op, candidate, validationResult,
+                                          selectedAdditionalL1Usage);
+
+  const double spillCost =
+      computeSpillCost(selectedSpillBytes, candidate.opConfig.outputLayout, op);
+
+  result.cost = emission + spillCost;
+  result.skipGroup = false;
+  result.outputSizeBytes = outputSize;
+  result.additionalL1Usage = selectedAdditionalL1Usage;
+  result.selectedSpillCount = selectedSpillCount;
+
+  TTMLIR_DEBUG(
+      ttmlir::LogComponent::ViterbiOptimizer,
+      "Candidate cost: op={} inputLayouts={} outputLayout={} "
+      "cost={} emission={} spill={} "
+      "cbPeak={} l1BuffersPeak={} outputL1PerCore={} "
+      "overallPeak={} additionalL1={} spillCount={} utility={}",
+      op->getName().getStringRef(),
+      optimizer_utils::layoutsToString(std::vector<TTNNLayoutAttr>(
+          candidate.inputLayouts.begin(), candidate.inputLayouts.end())),
+      optimizer_utils::layoutToString(candidate.opConfig.outputLayout),
+      result.cost, emission, spillCost, validationResult.cbPeakUsage,
+      validationResult.l1BuffersPeakUsage, validationResult.outputL1Usage,
+      validationResult.overallPeakL1Usage, selectedAdditionalL1Usage,
+      selectedSpillCount,
+      computeL1Utility(op, validationResult, selectedAdditionalL1Usage));
 
   return result;
 }

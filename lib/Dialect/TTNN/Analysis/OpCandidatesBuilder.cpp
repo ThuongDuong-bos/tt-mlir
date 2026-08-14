@@ -20,7 +20,7 @@ namespace mlir::tt::ttnn {
 namespace {
 
 struct GroupState {
-  llvm::DenseMap<size_t, llvm::SmallVector<OpConfigCandidate>>
+  llvm::DenseMap<std::size_t, llvm::SmallVector<OpConfigCandidate>>
       candidatesByGroup;
   llvm::SmallVector<TTNNLayoutAttr> keptDefaults;
 };
@@ -33,8 +33,8 @@ static constexpr std::array<CandidateGroup, 3> kRowMajorGroups = {
     CandidateGroup::RowMajorHeight, CandidateGroup::RowMajorBlock,
     CandidateGroup::RowMajorWidth};
 
-static size_t asIndex(CandidateGroup group) {
-  return static_cast<size_t>(group);
+static std::size_t asIndex(CandidateGroup group) {
+  return static_cast<std::size_t>(group);
 }
 
 static TensorMemoryLayout getMemoryLayoutOrInterleaved(TTNNLayoutAttr layout) {
@@ -174,10 +174,11 @@ static TTNNLayoutAttr pickActivationLayoutForOutputClass(
   return TTNNLayoutAttr{};
 }
 
-static llvm::SmallVector<TTNNLayoutAttr> extractInputLayouts(
-    mlir::Operation *op, llvm::ArrayRef<mlir::Value> activationOperands,
-    const TensorTypeLayoutsMap &tensorTypePossibleLayouts,
-    std::optional<TTNNLayoutAttr> targetOutputLayout) {
+static llvm::SmallVector<TTNNLayoutAttr>
+extractInputLayouts(mlir::Operation *op,
+                    llvm::ArrayRef<mlir::Value> activationOperands,
+                    const TensorTypeLayoutsMap &tensorTypePossibleLayouts,
+                    std::optional<TTNNLayoutAttr> targetOutputLayout) {
   llvm::SmallVector<TTNNLayoutAttr> inputLayouts;
 
   if (!op) {
@@ -246,7 +247,7 @@ static bool keepDefaultLayout(TTNNLayoutAttr layout,
 static bool isLayoutMatching(llvm::ArrayRef<mlir::Value> activationOperands,
                              llvm::ArrayRef<TTNNLayoutAttr> inputLayouts,
                              TTNNLayoutAttr outputLayout) {
-  size_t inputLayoutIndex = 0;
+  std::size_t inputLayoutIndex = 0;
 
   for (mlir::Value operand : activationOperands) {
     if (!mlir::isa<mlir::RankedTensorType>(operand.getType())) {
@@ -278,8 +279,7 @@ static bool isLayoutMatching(llvm::ArrayRef<mlir::Value> activationOperands,
 }
 
 static std::optional<LayoutFamily> getLayoutFamily(TTNNLayoutAttr layout) {
-  const TensorMemoryLayout memoryLayout =
-      getMemoryLayoutOrInterleaved(layout);
+  const TensorMemoryLayout memoryLayout = getMemoryLayoutOrInterleaved(layout);
   const bool tiled = layout.isTiled();
 
   switch (memoryLayout) {
@@ -313,14 +313,13 @@ static CandidateGroup getCandidateGroup(LayoutFamily family) {
   llvm_unreachable("unsupported layout family");
 }
 
-static std::optional<size_t> classifyGroup(mlir::Operation *op,
-                                           TTNNLayoutAttr layout) {
+static std::optional<std::size_t> classifyGroup(mlir::Operation *op,
+                                                TTNNLayoutAttr layout) {
   if (!op || !layout) {
     return std::nullopt;
   }
 
-  const TensorMemoryLayout memoryLayout =
-      getMemoryLayoutOrInterleaved(layout);
+  const TensorMemoryLayout memoryLayout = getMemoryLayoutOrInterleaved(layout);
 
   if (memoryLayout == TensorMemoryLayout::Interleaved) {
     if (layout.getBufferType() == BufferType::DRAM) {
@@ -343,10 +342,10 @@ static std::optional<size_t> classifyGroup(mlir::Operation *op,
 }
 
 static void
-appendGroupedCandidates(llvm::SmallVectorImpl<OpConfigCandidate> &dst,
+appendGroupedCandidates(llvm::SmallVectorImpl<OpConfigCandidate> &destination,
                         GroupState &state) {
   const auto appendGroupSet = [&](llvm::ArrayRef<CandidateGroup> groups,
-                                  size_t &nextGroupIndex) {
+                                  std::size_t &nextGroupIndex) {
     for (CandidateGroup group : groups) {
       auto groupIt = state.candidatesByGroup.find(asIndex(group));
       if (groupIt == state.candidatesByGroup.end() || groupIt->second.empty()) {
@@ -355,14 +354,14 @@ appendGroupedCandidates(llvm::SmallVectorImpl<OpConfigCandidate> &dst,
 
       for (OpConfigCandidate &candidate : groupIt->second) {
         candidate.groupIndex = nextGroupIndex;
-        dst.push_back(std::move(candidate));
+        destination.push_back(std::move(candidate));
       }
 
       ++nextGroupIndex;
     }
   };
 
-  size_t nextGroupIndex = 0;
+  std::size_t nextGroupIndex = 0;
 
   static constexpr std::array<CandidateGroup, 2> kDefaultGroups = {
       CandidateGroup::DefaultDRAM, CandidateGroup::DefaultL1};
@@ -382,7 +381,7 @@ static void printScheduleOrder(
   for (const auto &[func, operations] : schedule) {
     (void)func;
 
-    for (size_t index = 0; index < operations.size(); ++index) {
+    for (std::size_t index = 0; index < operations.size(); ++index) {
       TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer, "Op[{}]: {}", index,
                    operations[index]->getName().getStringRef());
     }
@@ -393,14 +392,16 @@ static void printScheduleOrder(
 
 PrunedGraphInfo OpCandidatesBuilder::makePrunedSubgraph(
     const llvm::DenseMap<mlir::func::FuncOp,
-                         llvm::SmallVector<mlir::Operation *>> &schedule) const {
+                         llvm::SmallVector<mlir::Operation *>> &schedule)
+    const {
   PrunedGraphInfo info;
 
   for (const auto &[func, operations] : schedule) {
     llvm::SmallVector<mlir::Operation *> &prunedOps = info.prunedSchedule[func];
     mlir::Operation *lastKeptOp = nullptr;
 
-    for (size_t fullIndex = 0; fullIndex < operations.size(); ++fullIndex) {
+    for (std::size_t fullIndex = 0; fullIndex < operations.size();
+         ++fullIndex) {
       mlir::Operation *op = operations[fullIndex];
       info.fullOpIndex[op] = fullIndex;
 
@@ -418,30 +419,6 @@ PrunedGraphInfo OpCandidatesBuilder::makePrunedSubgraph(
   }
 
   return info;
-}
-
-void OpCandidatesBuilder::buildFullCandidates(
-    const TensorTypeLayoutsMap &tensorTypePossibleLayouts,
-    const llvm::DenseMap<mlir::func::FuncOp,
-                         llvm::SmallVector<mlir::Operation *>> &schedule,
-    const llvm::DenseMap<mlir::Operation *, std::vector<OpConfig>>
-        &legalOpConfigs) {
-  printScheduleOrder(schedule, "Full Graph");
-  fullCandidates = buildCandidatesFromSchedule(tensorTypePossibleLayouts,
-                                               schedule, legalOpConfigs);
-}
-
-void OpCandidatesBuilder::buildPrunedCandidates(
-    const TensorTypeLayoutsMap &tensorTypePossibleLayouts,
-    const llvm::DenseMap<mlir::func::FuncOp,
-                         llvm::SmallVector<mlir::Operation *>> &schedule,
-    const llvm::DenseMap<mlir::Operation *, std::vector<OpConfig>>
-        &legalOpConfigs) {
-  prunedGraphInfo = makePrunedSubgraph(schedule);
-  printScheduleOrder(prunedGraphInfo.prunedSchedule, "Pruned Graph");
-  prunedCandidates = buildCandidatesFromSchedule(tensorTypePossibleLayouts,
-                                                 prunedGraphInfo.prunedSchedule,
-                                                 legalOpConfigs);
 }
 
 OpCandidateBuilderResult OpCandidatesBuilder::buildCandidatesFromSchedule(
@@ -465,7 +442,7 @@ OpCandidateBuilderResult OpCandidatesBuilder::buildCandidatesFromSchedule(
   for (const auto &[func, operations] : schedule) {
     (void)func;
 
-    for (size_t opIndex = 0; opIndex < operations.size(); ++opIndex) {
+    for (std::size_t opIndex = 0; opIndex < operations.size(); ++opIndex) {
       mlir::Operation *op = operations[opIndex];
 
       if (op->getNumResults() == 0) {
@@ -527,7 +504,7 @@ OpCandidateBuilderResult OpCandidatesBuilder::buildCandidatesFromSchedule(
           continue;
         }
 
-        std::optional<size_t> groupIndex = classifyGroup(op, outputLayout);
+        std::optional<std::size_t> groupIndex = classifyGroup(op, outputLayout);
         if (!groupIndex) {
           continue;
         }
@@ -549,6 +526,30 @@ OpCandidateBuilderResult OpCandidatesBuilder::buildCandidatesFromSchedule(
   }
 
   return generatedCandidates;
+}
+
+void OpCandidatesBuilder::buildFullCandidates(
+    const TensorTypeLayoutsMap &tensorTypePossibleLayouts,
+    const llvm::DenseMap<mlir::func::FuncOp,
+                         llvm::SmallVector<mlir::Operation *>> &schedule,
+    const llvm::DenseMap<mlir::Operation *, std::vector<OpConfig>>
+        &legalOpConfigs) {
+  printScheduleOrder(schedule, "Full Graph");
+  fullCandidates = buildCandidatesFromSchedule(tensorTypePossibleLayouts,
+                                               schedule, legalOpConfigs);
+}
+
+void OpCandidatesBuilder::buildPrunedCandidates(
+    const TensorTypeLayoutsMap &tensorTypePossibleLayouts,
+    const llvm::DenseMap<mlir::func::FuncOp,
+                         llvm::SmallVector<mlir::Operation *>> &schedule,
+    const llvm::DenseMap<mlir::Operation *, std::vector<OpConfig>>
+        &legalOpConfigs) {
+  prunedGraphInfo = makePrunedSubgraph(schedule);
+  printScheduleOrder(prunedGraphInfo.prunedSchedule, "Pruned Graph");
+  prunedCandidates = buildCandidatesFromSchedule(tensorTypePossibleLayouts,
+                                                 prunedGraphInfo.prunedSchedule,
+                                                 legalOpConfigs);
 }
 
 } // namespace mlir::tt::ttnn

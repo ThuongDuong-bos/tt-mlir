@@ -4,15 +4,14 @@
 
 #include "ttmlir/Dialect/TTNN/Analysis/TransitionEdgeAnalysis.h"
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/IR/Operation.h"
-#include "mlir/IR/Value.h"
 #include "ttmlir/Dialect/TTNN/IR/TTNNOps.h"
 #include "ttmlir/Dialect/TTNN/Utils/OptimizerUtils.h"
 #include "ttmlir/Dialect/TTNN/Validation/OpConstraintValidation.h"
 #include "ttmlir/Support/Logger.h"
 
-#include "llvm/ADT/STLExtras.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Operation.h"
+#include "mlir/IR/Value.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -65,8 +64,9 @@ static bool isConversionOp(Operation *op) {
              PadOp, TypecastOp>(op);
 }
 
-// Current uplift only explicitly supports Q/K/V-style multi-result producers.
-// Keep this local until there is a shared non-BOS utility for the same rule.
+// The current uplift only explicitly supports Q/K/V-style multi-result
+// producers. Keep this local until a shared non-BOS utility provides the same
+// rule.
 static bool isQKVHeadsOp(Operation *op) {
   if (!op) {
     return false;
@@ -202,10 +202,9 @@ validateTransitionOp(const TransitionOpInfo &transitionOpInfo, Value inputValue,
             ? std::optional<ttcore::DataType>(outputLayout.getDataType())
             : std::nullopt;
 
-    // Current branch OpModel<ToLayoutOp>::getOpConstraints takes:
-    //   inputShape, inputLayout, outputDtype, outputLayout.
-    //
-    // Do NOT pass deviceGrid here.
+    // The current ToLayoutOp model accepts input shape, input layout, output
+    // data type, and output layout. Passing a device grid would select a
+    // different validation signature.
     validationResult = op_constraint_validation::validateOperation<ToLayoutOp>(
         contextOp, additionalL1Usage, inputType.getShape(), inputLayout,
         outputDtype, outputLayout);
@@ -235,15 +234,301 @@ validateTransitionOp(const TransitionOpInfo &transitionOpInfo, Value inputValue,
 // Main analysis
 //===----------------------------------------------------------------------===//
 
-LogicalResult TransitionEdgeAnalysis::run() {
-  transitionEdges.clear();
-  emittedUses.clear();
-  valueLayoutMap.clear();
+std::optional<TTNNLayoutAttr>
+TransitionEdgeAnalysis::getRequiredLayout(Operation *op,
+                                          unsigned operandIndex) const {
+  auto inputLayoutsIt = inputLayoutsMap.find(op);
 
-  resolveOpLayouts();
-  emitEdges();
+  if (inputLayoutsIt == inputLayoutsMap.end()) {
+    return std::nullopt;
+  }
 
-  return validateTransitions();
+  // inputLayoutsMap contains tensor operands only. Translate the MLIR operand
+  // index into its tensor-input-layout index.
+  unsigned tensorInputIndex = 0;
+
+  for (unsigned currentOperandIndex = 0;
+       currentOperandIndex < op->getNumOperands(); ++currentOperandIndex) {
+    Value operand = op->getOperand(currentOperandIndex);
+
+    if (!isa<RankedTensorType>(operand.getType())) {
+      continue;
+    }
+
+    if (currentOperandIndex == operandIndex) {
+      if (tensorInputIndex >= inputLayoutsIt->second.size()) {
+        return std::nullopt;
+      }
+
+      TTNNLayoutAttr layout = inputLayoutsIt->second[tensorInputIndex];
+
+      return layout ? std::optional<TTNNLayoutAttr>(layout) : std::nullopt;
+    }
+
+    ++tensorInputIndex;
+  }
+
+  return std::nullopt;
+}
+
+std::optional<std::pair<Value, TTNNLayoutAttr>>
+TransitionEdgeAnalysis::resolveProducerAndLayout(Value value) {
+  llvm::SmallPtrSet<Value, 8> visited;
+
+  auto getLayoutFromValue = [&](Value currentValue) -> TTNNLayoutAttr {
+    if (auto layoutIt = valueLayoutMap.find(currentValue);
+        layoutIt != valueLayoutMap.end()) {
+      return layoutIt->second;
+    }
+
+    auto tensorType = dyn_cast<RankedTensorType>(currentValue.getType());
+
+    if (!tensorType) {
+      return nullptr;
+    }
+
+    auto layout = dyn_cast_or_null<TTNNLayoutAttr>(tensorType.getEncoding());
+
+    if (layout) {
+      valueLayoutMap[currentValue] = layout;
+    }
+
+    return layout;
+  };
+
+  TTNNLayoutAttr actualLayout = getLayoutFromValue(value);
+
+  if (!actualLayout) {
+    return std::nullopt;
+  }
+
+  Value currentValue = value;
+
+  while (true) {
+    if (!visited.insert(currentValue).second) {
+      return std::nullopt;
+    }
+
+    if (!isa<RankedTensorType>(currentValue.getType())) {
+      return std::nullopt;
+    }
+
+    Operation *defOp = currentValue.getDefiningOp();
+
+    // Function argument.
+    if (!defOp) {
+      return std::make_pair(currentValue, actualLayout);
+    }
+
+    // Stop at policy-selected producer while preserving exact result Value.
+    if (opConfigMap.contains(defOp)) {
+      return std::make_pair(currentValue, actualLayout);
+    }
+
+    // Existing conversion operations are traversed, but the layout presented
+    // to the consumer remains the encoding of the original consumer operand.
+    if (isConversionOp(defOp)) {
+      if (defOp->getNumOperands() != 1) {
+        return std::nullopt;
+      }
+
+      currentValue = defOp->getOperand(0);
+      continue;
+    }
+
+    // Pass through simple one-input non-policy operations.
+    if (defOp->getNumOperands() != 1) {
+      return std::nullopt;
+    }
+
+    Value nextValue = defOp->getOperand(0);
+
+    if (!isa<RankedTensorType>(nextValue.getType())) {
+      return std::nullopt;
+    }
+
+    currentValue = nextValue;
+  }
+}
+
+GetTransitionOpsResult TransitionEdgeAnalysis::getTransitionOps(
+    Operation *producerOp, Value consumerOperand, Operation *consumerOp,
+    TTNNLayoutAttr producerOutputLayout, TTNNLayoutAttr consumerInputLayout,
+    uint64_t additionalL1Usage) const {
+  if (!consumerOperand || !consumerOp || !producerOutputLayout ||
+      !consumerInputLayout) {
+    return {false, {}};
+  }
+
+  // Q/K/V operations can expose result-specific layouts through the exact SSA
+  // result type. Prefer that encoding when available.
+  if (producerOp && producerOp->getNumResults() > 1 &&
+      isQKVHeadsOp(producerOp)) {
+    Value currentValue = consumerOperand;
+
+    while (Operation *defOp = currentValue.getDefiningOp()) {
+      if (defOp == producerOp) {
+        if (auto tensorType =
+                dyn_cast<RankedTensorType>(currentValue.getType())) {
+          if (auto exactLayout =
+                  dyn_cast_or_null<TTNNLayoutAttr>(tensorType.getEncoding())) {
+            producerOutputLayout = exactLayout;
+          }
+        }
+
+        break;
+      }
+
+      if (defOp->getNumOperands() != 1) {
+        break;
+      }
+
+      currentValue = defOp->getOperand(0);
+    }
+  }
+
+  TransitionOpsInfo existingTransOps =
+      collectTransitionOps(consumerOperand, producerOp);
+
+  if (!existingTransOps.reachedProducer) {
+    TTMLIR_DEBUG(
+        ttmlir::LogComponent::ViterbiOptimizer,
+        "Transition planning failed: operand does not trace to producer. "
+        "consumer={} producer={}",
+        consumerOp->getName().getStringRef(),
+        producerOp ? producerOp->getName().getStringRef()
+                   : StringRef("<block-arg>"));
+
+    return {false, {}};
+  }
+
+  GetTransitionOpsResult result;
+
+  for (const auto &[opInfo, _] : existingTransOps.ops) {
+    result.transitionOps.push_back(opInfo);
+  }
+
+  TTNNLayoutAttr finalProducerOutputLayout =
+      existingTransOps.ops.empty()
+          ? producerOutputLayout
+          : existingTransOps.ops.back().first.outputLayout;
+
+  llvm::SmallVector<TransitionOpInfo> plannedTransitionOps =
+      constructTransitionOps(finalProducerOutputLayout, consumerInputLayout);
+
+  result.transitionOps.append(plannedTransitionOps.begin(),
+                              plannedTransitionOps.end());
+
+  // Existing conversion operations already exist in the module and are not
+  // revalidated here. Only newly planned transition operations are validated.
+  const std::size_t existingOpsCount = existingTransOps.ops.size();
+
+  for (std::size_t transitionIndex = existingOpsCount;
+       transitionIndex < result.transitionOps.size(); ++transitionIndex) {
+    const TransitionOpInfo &transitionOpInfo =
+        result.transitionOps[transitionIndex];
+
+    op_constraint_validation::ValidationResult validationResult =
+        validateTransitionOp(transitionOpInfo, consumerOperand, consumerOp,
+                             additionalL1Usage);
+
+    if (!validationResult.isSuccess()) {
+      TTMLIR_DEBUG(
+          ttmlir::LogComponent::ViterbiOptimizer,
+          "Transition validation failed: op={} status={} error={} "
+          "inputLayout={} outputLayout={}",
+          transitionOpInfo.opName,
+          op_constraint_validation::validationStatusToString(
+              validationResult.status),
+          validationResult.errorMessage.empty() ? std::string("<none>")
+                                                : validationResult.errorMessage,
+          optimizer_utils::layoutToString(transitionOpInfo.inputLayout),
+          optimizer_utils::layoutToString(transitionOpInfo.outputLayout));
+
+      return {false, {}};
+    }
+  }
+
+  // Multi-result Q/K/V producer:
+  //
+  // The exact result edge may resolve to a layout different from the
+  // consumer's original candidate input layout. Revalidate the consumer using
+  // the final resolved layout on exactly that tensor operand.
+  if (producerOp && producerOp->getNumResults() > 1) {
+    if (!isQKVHeadsOp(producerOp)) {
+      TTMLIR_FATAL(
+          ttmlir::LogComponent::ViterbiOptimizer,
+          "Only Q/K/V multi-result producer ops are currently supported in "
+          "TransitionEdgeAnalysis: {}",
+          producerOp->getName().getStringRef());
+    }
+
+    auto configIt = opConfigMap.find(consumerOp);
+    auto layoutsIt = inputLayoutsMap.find(consumerOp);
+
+    if (configIt == opConfigMap.end() || layoutsIt == inputLayoutsMap.end()) {
+      TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+                   "Transition consumer validation missing state for op {}",
+                   consumerOp->getName().getStringRef());
+
+      return {false, {}};
+    }
+
+    TTNNLayoutAttr finalLayout = result.transitionOps.empty()
+                                     ? producerOutputLayout
+                                     : result.transitionOps.back().outputLayout;
+
+    llvm::SmallVector<TTNNLayoutAttr> inputLayouts = layoutsIt->second;
+
+    unsigned tensorInputLayoutIndex = 0;
+    bool updatedEdgeInputLayout = false;
+
+    for (unsigned operandIndex = 0; operandIndex < consumerOp->getNumOperands();
+         ++operandIndex) {
+      Value operand = consumerOp->getOperand(operandIndex);
+
+      if (!isa<RankedTensorType>(operand.getType())) {
+        continue;
+      }
+
+      if (operand == consumerOperand) {
+        if (tensorInputLayoutIndex >= inputLayouts.size()) {
+          return {false, {}};
+        }
+
+        inputLayouts[tensorInputLayoutIndex] = finalLayout;
+
+        updatedEdgeInputLayout = true;
+      }
+
+      ++tensorInputLayoutIndex;
+    }
+
+    if (!updatedEdgeInputLayout) {
+      return {false, {}};
+    }
+
+    op_constraint_validation::ValidationResult consumerValidationResult =
+        op_constraint_validation::validateOperation(
+            consumerOp, inputLayouts, configIt->second, additionalL1Usage);
+
+    if (!consumerValidationResult.isSuccess()) {
+      TTMLIR_DEBUG(
+          ttmlir::LogComponent::ViterbiOptimizer,
+          "Transition consumer validation failed: op={} status={} error={}",
+          consumerOp->getName().getStringRef(),
+          op_constraint_validation::validationStatusToString(
+              consumerValidationResult.status),
+          consumerValidationResult.errorMessage.empty()
+              ? std::string("<none>")
+              : consumerValidationResult.errorMessage);
+
+      return {false, {}};
+    }
+  }
+
+  result.isSuccess = true;
+  return result;
 }
 
 void TransitionEdgeAnalysis::resolveOpLayouts() {
@@ -444,309 +729,15 @@ LogicalResult TransitionEdgeAnalysis::validateTransitions() {
   return success();
 }
 
-//===----------------------------------------------------------------------===//
-// Layout resolution
-//===----------------------------------------------------------------------===//
-
-std::optional<TTNNLayoutAttr>
-TransitionEdgeAnalysis::getRequiredLayout(Operation *op,
-                                          unsigned operandIndex) const {
-  auto inputLayoutsIt = inputLayoutsMap.find(op);
-
-  if (inputLayoutsIt == inputLayoutsMap.end()) {
-    return std::nullopt;
-  }
-
-  // inputLayoutsMap contains tensor operands only. Translate the MLIR operand
-  // index into its tensor-input-layout index.
-  unsigned tensorInputIndex = 0;
-
-  for (unsigned currentOperandIndex = 0;
-       currentOperandIndex < op->getNumOperands(); ++currentOperandIndex) {
-    Value operand = op->getOperand(currentOperandIndex);
-
-    if (!isa<RankedTensorType>(operand.getType())) {
-      continue;
-    }
-
-    if (currentOperandIndex == operandIndex) {
-      if (tensorInputIndex >= inputLayoutsIt->second.size()) {
-        return std::nullopt;
-      }
-
-      TTNNLayoutAttr layout = inputLayoutsIt->second[tensorInputIndex];
-
-      return layout ? std::optional<TTNNLayoutAttr>(layout) : std::nullopt;
-    }
-
-    ++tensorInputIndex;
-  }
-
-  return std::nullopt;
-}
-
-std::optional<std::pair<Value, TTNNLayoutAttr>>
-TransitionEdgeAnalysis::resolveProducerAndLayout(Value value) {
-  llvm::SmallPtrSet<Value, 8> visited;
-
-  auto getLayoutFromValue = [&](Value currentValue) -> TTNNLayoutAttr {
-    if (auto layoutIt = valueLayoutMap.find(currentValue);
-        layoutIt != valueLayoutMap.end()) {
-      return layoutIt->second;
-    }
-
-    auto tensorType = dyn_cast<RankedTensorType>(currentValue.getType());
-
-    if (!tensorType) {
-      return nullptr;
-    }
-
-    auto layout = dyn_cast_or_null<TTNNLayoutAttr>(tensorType.getEncoding());
-
-    if (layout) {
-      valueLayoutMap[currentValue] = layout;
-    }
-
-    return layout;
-  };
-
-  TTNNLayoutAttr actualLayout = getLayoutFromValue(value);
-
-  if (!actualLayout) {
-    return std::nullopt;
-  }
-
-  Value currentValue = value;
-
-  while (true) {
-    if (!visited.insert(currentValue).second) {
-      return std::nullopt;
-    }
-
-    if (!isa<RankedTensorType>(currentValue.getType())) {
-      return std::nullopt;
-    }
-
-    Operation *defOp = currentValue.getDefiningOp();
-
-    // Function argument.
-    if (!defOp) {
-      return std::make_pair(currentValue, actualLayout);
-    }
-
-    // Stop at policy-selected producer while preserving exact result Value.
-    if (opConfigMap.contains(defOp)) {
-      return std::make_pair(currentValue, actualLayout);
-    }
-
-    // Existing conversion operations are traversed, but the layout presented
-    // to the consumer remains the encoding of the original consumer operand.
-    if (isConversionOp(defOp)) {
-      if (defOp->getNumOperands() != 1) {
-        return std::nullopt;
-      }
-
-      currentValue = defOp->getOperand(0);
-      continue;
-    }
-
-    // Pass through simple one-input non-policy operations.
-    if (defOp->getNumOperands() != 1) {
-      return std::nullopt;
-    }
-
-    Value nextValue = defOp->getOperand(0);
-
-    if (!isa<RankedTensorType>(nextValue.getType())) {
-      return std::nullopt;
-    }
-
-    currentValue = nextValue;
-  }
-}
-
-//===----------------------------------------------------------------------===//
-// Transition planning
-//===----------------------------------------------------------------------===//
-
-GetTransitionOpsResult TransitionEdgeAnalysis::getTransitionOps(
-    Operation *producerOp, Value consumerOperand, Operation *consumerOp,
-    TTNNLayoutAttr producerOutputLayout, TTNNLayoutAttr consumerInputLayout,
-    uint64_t additionalL1Usage) const {
-  if (!consumerOperand || !consumerOp || !producerOutputLayout ||
-      !consumerInputLayout) {
-    return {false, {}};
-  }
-
-  // Q/K/V operations can expose result-specific layouts through the exact SSA
-  // result type. Prefer that encoding when available.
-  if (producerOp && producerOp->getNumResults() > 1 &&
-      isQKVHeadsOp(producerOp)) {
-    Value currentValue = consumerOperand;
-
-    while (Operation *defOp = currentValue.getDefiningOp()) {
-      if (defOp == producerOp) {
-        if (auto tensorType =
-                dyn_cast<RankedTensorType>(currentValue.getType())) {
-          if (auto exactLayout =
-                  dyn_cast_or_null<TTNNLayoutAttr>(tensorType.getEncoding())) {
-            producerOutputLayout = exactLayout;
-          }
-        }
-
-        break;
-      }
-
-      if (defOp->getNumOperands() != 1) {
-        break;
-      }
-
-      currentValue = defOp->getOperand(0);
-    }
-  }
-
-  TransitionOpsInfo existingTransOps =
-      collectTransitionOps(consumerOperand, producerOp);
-
-  if (!existingTransOps.reachedProducer) {
-    TTMLIR_DEBUG(
-        ttmlir::LogComponent::ViterbiOptimizer,
-        "Transition planning failed: operand does not trace to producer. "
-        "consumer={} producer={}",
-        consumerOp->getName().getStringRef(),
-        producerOp ? producerOp->getName().getStringRef()
-                   : StringRef("<block-arg>"));
-
-    return {false, {}};
-  }
-
-  GetTransitionOpsResult result;
-
-  for (const auto &[opInfo, _] : existingTransOps.ops) {
-    result.transitionOps.push_back(opInfo);
-  }
-
-  TTNNLayoutAttr finalProducerOutputLayout =
-      existingTransOps.ops.empty()
-          ? producerOutputLayout
-          : existingTransOps.ops.back().first.outputLayout;
-
-  llvm::SmallVector<TransitionOpInfo> plannedTransitionOps =
-      constructTransitionOps(finalProducerOutputLayout, consumerInputLayout);
-
-  result.transitionOps.append(plannedTransitionOps.begin(),
-                              plannedTransitionOps.end());
-
-  // Existing conversion operations already exist in the module and are not
-  // revalidated here. Only newly planned transition operations are validated.
-  const size_t existingOpsCount = existingTransOps.ops.size();
-
-  for (size_t transitionIndex = existingOpsCount;
-       transitionIndex < result.transitionOps.size(); ++transitionIndex) {
-    const TransitionOpInfo &transitionOpInfo =
-        result.transitionOps[transitionIndex];
-
-    op_constraint_validation::ValidationResult validationResult =
-        validateTransitionOp(transitionOpInfo, consumerOperand, consumerOp,
-                             additionalL1Usage);
-
-    if (!validationResult.isSuccess()) {
-      TTMLIR_DEBUG(
-          ttmlir::LogComponent::ViterbiOptimizer,
-          "Transition validation failed: op={} status={} error={} "
-          "inputLayout={} outputLayout={}",
-          transitionOpInfo.opName,
-          op_constraint_validation::validationStatusToString(
-              validationResult.status),
-          validationResult.errorMessage.empty() ? std::string("<none>")
-                                                : validationResult.errorMessage,
-          optimizer_utils::layoutToString(transitionOpInfo.inputLayout),
-          optimizer_utils::layoutToString(transitionOpInfo.outputLayout));
-
-      return {false, {}};
-    }
-  }
-
-  // Multi-result Q/K/V producer:
-  //
-  // The exact result edge may resolve to a layout different from the
-  // consumer's original candidate input layout. Revalidate the consumer using
-  // the final resolved layout on exactly that tensor operand.
-  if (producerOp && producerOp->getNumResults() > 1) {
-    if (!isQKVHeadsOp(producerOp)) {
-      TTMLIR_FATAL(
-          ttmlir::LogComponent::ViterbiOptimizer,
-          "Only Q/K/V multi-result producer ops are currently supported in "
-          "TransitionEdgeAnalysis: {}",
-          producerOp->getName().getStringRef());
-    }
-
-    auto configIt = opConfigMap.find(consumerOp);
-    auto layoutsIt = inputLayoutsMap.find(consumerOp);
-
-    if (configIt == opConfigMap.end() || layoutsIt == inputLayoutsMap.end()) {
-      TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
-                   "Transition consumer validation missing state for op {}",
-                   consumerOp->getName().getStringRef());
-
-      return {false, {}};
-    }
-
-    TTNNLayoutAttr finalLayout = result.transitionOps.empty()
-                                     ? producerOutputLayout
-                                     : result.transitionOps.back().outputLayout;
-
-    llvm::SmallVector<TTNNLayoutAttr> inputLayouts = layoutsIt->second;
-
-    unsigned tensorInputLayoutIndex = 0;
-    bool updatedEdgeInputLayout = false;
-
-    for (unsigned operandIndex = 0; operandIndex < consumerOp->getNumOperands();
-         ++operandIndex) {
-      Value operand = consumerOp->getOperand(operandIndex);
-
-      if (!isa<RankedTensorType>(operand.getType())) {
-        continue;
-      }
-
-      if (operand == consumerOperand) {
-        if (tensorInputLayoutIndex >= inputLayouts.size()) {
-          return {false, {}};
-        }
-
-        inputLayouts[tensorInputLayoutIndex] = finalLayout;
-
-        updatedEdgeInputLayout = true;
-      }
-
-      ++tensorInputLayoutIndex;
-    }
-
-    if (!updatedEdgeInputLayout) {
-      return {false, {}};
-    }
-
-    op_constraint_validation::ValidationResult consumerValidationResult =
-        op_constraint_validation::validateOperation(
-            consumerOp, inputLayouts, configIt->second, additionalL1Usage);
-
-    if (!consumerValidationResult.isSuccess()) {
-      TTMLIR_DEBUG(
-          ttmlir::LogComponent::ViterbiOptimizer,
-          "Transition consumer validation failed: op={} status={} error={}",
-          consumerOp->getName().getStringRef(),
-          op_constraint_validation::validationStatusToString(
-              consumerValidationResult.status),
-          consumerValidationResult.errorMessage.empty()
-              ? std::string("<none>")
-              : consumerValidationResult.errorMessage);
-
-      return {false, {}};
-    }
-  }
-
-  result.isSuccess = true;
-  return result;
+LogicalResult TransitionEdgeAnalysis::run() {
+  transitionEdges.clear();
+  emittedUses.clear();
+  valueLayoutMap.clear();
+
+  resolveOpLayouts();
+  emitEdges();
+
+  return validateTransitions();
 }
 
 } // namespace mlir::tt::ttnn::analysis

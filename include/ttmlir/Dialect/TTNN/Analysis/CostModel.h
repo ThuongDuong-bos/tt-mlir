@@ -23,7 +23,7 @@
 namespace mlir::tt::ttnn {
 
 struct EmissionCostParams {
-  double wCore = 0.0167;  // 1.0 / 6.0;
+  double wCore = 0.0167;
   double wRisk = 10.0;
   double wCb = 25.0;
   double wBuf = 1.0;
@@ -54,36 +54,24 @@ public:
   using CandidateOutputSizesMap =
       llvm::DenseMap<mlir::Operation *,
                      llvm::SmallVector<std::optional<uint64_t>>>;
-
   using CandidateSizeList = llvm::SmallVector<uint64_t>;
   using PassiveTensorList = llvm::SmallVector<CandidateSizeList>;
 
   struct LocalCostResult {
     double cost = 0.0;
-    /// true means "skip remaining candidates in this layout group".
-    /// This is set only for non-OOM validation failures on grouped candidates.
     bool skipGroup = false;
-    /// Cached bytes for later passive/spill accounting when requested by
-    /// caller.
     std::optional<uint64_t> outputSizeBytes;
-
-    /// Additional per-core L1 memory already occupied by live passive tensors
     uint64_t additionalL1Usage = 0;
-    /// Number of passive producers selected to spill to DRAM for this
-    /// candidate.
-    size_t selectedSpillCount = 0;
+    std::size_t selectedSpillCount = 0;
   };
 
   struct TransitionEdgeCostInput {
     mlir::Operation *producerOp = nullptr;
     mlir::Operation *consumerOp = nullptr;
     mlir::Value consumerOperand;
-
     const OpConfigCandidate *producerCandidate = nullptr;
     const OpConfigCandidate *consumerCandidate = nullptr;
-
     const llvm::DenseMap<mlir::Operation *, OpConfig> *opConfigMap = nullptr;
-
     uint64_t additionalL1Usage = 0;
   };
 
@@ -92,19 +80,17 @@ public:
 
   virtual ~CostModel() = default;
 
-  virtual LocalCostResult getLocalCost(
-      mlir::Operation *op, const OpConfigCandidate &candidate,
-      llvm::ArrayRef<mlir::Operation *> passiveTensorProducers,
-      bool shouldComputeOutputSize,
-      const CandidateOutputSizesMap &storedCandidateOutputSizes) const;
+  virtual LocalCostResult
+  getLocalCost(mlir::Operation *op, const OpConfigCandidate &candidate,
+               llvm::ArrayRef<mlir::Operation *> passiveTensorProducers,
+               bool shouldComputeOutputSize,
+               const CandidateOutputSizesMap &storedCandidateOutputSizes) const;
 
-  virtual double
-  getTransitionCost(const TransitionEdgeCostInput &input) const;
+  virtual double getTransitionCost(const TransitionEdgeCostInput &input) const;
 
-  virtual std::optional<uint64_t>
-  computeOutputSize(std::optional<TTNNLayoutAttr> outputLayout,
-                    const op_constraint_validation::ValidationResult
-                        &validationResult) const;
+  virtual std::optional<uint64_t> computeOutputSize(
+      std::optional<TTNNLayoutAttr> outputLayout,
+      const op_constraint_validation::ValidationResult &validationResult) const;
 
 protected:
   virtual double getEmissionCost(
@@ -133,11 +119,11 @@ protected:
       llvm::ArrayRef<mlir::Operation *> passiveTensorProducers,
       const CandidateOutputSizesMap &storedCandidateOutputSizes) const;
 
-  op_constraint_validation::ValidationResult validateOpConfig(
-      mlir::Operation *op, const OpConfigCandidate &candidate,
-      const PassiveTensorList &passiveTensorList,
-      uint64_t &selectedAdditionalL1Usage,
-      size_t &selectedSpillCount) const;
+  op_constraint_validation::ValidationResult
+  validateOpConfig(mlir::Operation *op, const OpConfigCandidate &candidate,
+                   const PassiveTensorList &passiveTensorList,
+                   uint64_t &selectedAdditionalL1Usage,
+                   std::size_t &selectedSpillCount) const;
 
   EmissionCostParams emissionCostParams;
   TransitionCostParams transitionCostParams;

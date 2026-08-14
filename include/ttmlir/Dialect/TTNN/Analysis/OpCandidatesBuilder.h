@@ -2,8 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#ifndef TTMLIR_DIALECT_TTNN_ANALYSIS_OPCANDIDATESBUILDER_H
-#define TTMLIR_DIALECT_TTNN_ANALYSIS_OPCANDIDATESBUILDER_H
+#pragma once
 
 #include "ttmlir/Dialect/TTNN/Analysis/OpConfig.h"
 #include "ttmlir/Dialect/TTNN/Analysis/TensorLayouts.h"
@@ -21,32 +20,30 @@
 
 namespace mlir::tt::ttnn {
 
-// Coarse layout family used during candidate grouping.
 enum class LayoutFamily : uint8_t {
-  TileHeight = 0,
-  TileBlock = 1,
-  TileWidth = 2,
-  RowMajorHeight = 3,
-  RowMajorBlock = 4,
-  RowMajorWidth = 5,
+  TileHeight,
+  TileBlock,
+  TileWidth,
+  RowMajorHeight,
+  RowMajorBlock,
+  RowMajorWidth,
 };
 
-// Emission/processing groups assigned to candidates.
 enum class CandidateGroup : uint8_t {
-  DefaultDRAM = 0,
-  DefaultL1 = 1,
-  TileHeight = 2,
-  TileBlock = 3,
-  TileWidth = 4,
-  RowMajorHeight = 5,
-  RowMajorBlock = 6,
-  RowMajorWidth = 7,
+  DefaultDRAM,
+  DefaultL1,
+  TileHeight,
+  TileBlock,
+  TileWidth,
+  RowMajorHeight,
+  RowMajorBlock,
+  RowMajorWidth,
 };
 
 struct OpConfigCandidate {
   llvm::SmallVector<TTNNLayoutAttr> inputLayouts;
   OpConfig opConfig;
-  std::optional<size_t> groupIndex;
+  std::optional<std::size_t> groupIndex;
 };
 
 struct OpCandidateBuilderResult {
@@ -57,10 +54,8 @@ struct OpCandidateBuilderResult {
 struct PrunedGraphInfo {
   llvm::DenseMap<mlir::func::FuncOp, llvm::SmallVector<mlir::Operation *>>
       prunedSchedule;
-
-  llvm::DenseMap<mlir::Operation *, size_t> fullOpIndex;
-  llvm::DenseMap<mlir::Operation *, size_t> prunedOpIndex;
-
+  llvm::DenseMap<mlir::Operation *, std::size_t> fullOpIndex;
+  llvm::DenseMap<mlir::Operation *, std::size_t> prunedOpIndex;
   llvm::DenseMap<mlir::Operation *, llvm::SmallVector<mlir::Operation *>>
       removedOpsAfterPrunedOp;
 };
@@ -91,9 +86,7 @@ public:
     return prunedCandidates;
   }
 
-  const PrunedGraphInfo &getPrunedGraphInfo() const {
-    return prunedGraphInfo;
-  }
+  const PrunedGraphInfo &getPrunedGraphInfo() const { return prunedGraphInfo; }
 
 private:
   PrunedGraphInfo makePrunedSubgraph(
@@ -114,5 +107,3 @@ private:
 };
 
 } // namespace mlir::tt::ttnn
-
-#endif // TTMLIR_DIALECT_TTNN_ANALYSIS_OPCANDIDATESBUILDER_H

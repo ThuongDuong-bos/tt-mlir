@@ -5,7 +5,6 @@
 #include "ttmlir/Dialect/TTNN/Analysis/ReallocationAnalysis.h"
 
 #include "ttmlir/Dialect/TTNN/Interfaces/TTNNOpModelInterface.h"
-#include "ttmlir/Dialect/TTNN/Utils/OptimizerUtils.h"
 #include "ttmlir/Dialect/TTNN/Utils/Utils.h"
 #include "ttmlir/Dialect/TTNN/Validation/OpConstraintValidation.h"
 #include "ttmlir/Support/Logger.h"
@@ -16,7 +15,6 @@
 #include "llvm/ADT/STLExtras.h"
 
 #include <algorithm>
-#include <limits>
 
 namespace mlir::tt::ttnn {
 
@@ -58,19 +56,20 @@ bool isDeviceBufferOp(Operation *op) {
 bool ShardAllocationModel::allocate(TensorMemoryEntry &tensor) {
   assert(!tensor.isAllocated());
 
-  for (size_t i = freeBlocks.size(); i > 0; --i) {
-    FreeBlock &block = freeBlocks[i - 1];
-    const size_t blockSize = block.endAddress - block.startAddress;
+  for (std::size_t blockIndex = freeBlocks.size(); blockIndex > 0;
+       --blockIndex) {
+    FreeBlock &block = freeBlocks[blockIndex - 1];
+    const std::size_t blockSize = block.endAddress - block.startAddress;
     if (blockSize < tensor.getBufferSize()) {
       continue;
     }
 
-    const size_t allocAddress = block.endAddress - tensor.getBufferSize();
+    const std::size_t allocAddress = block.endAddress - tensor.getBufferSize();
     tensor.allocate(allocAddress);
     shardedTensors.push_back(&tensor);
 
     if (blockSize == tensor.getBufferSize()) {
-      freeBlocks.erase(freeBlocks.begin() + (i - 1));
+      freeBlocks.erase(freeBlocks.begin() + (blockIndex - 1));
     } else {
       block.endAddress -= tensor.getBufferSize();
     }
@@ -87,8 +86,8 @@ bool ShardAllocationModel::deallocate(TensorMemoryEntry &tensor) {
     return false;
   }
 
-  const size_t startAddress = tensor.start();
-  const size_t endAddress = tensor.end();
+  const std::size_t startAddress = tensor.start();
+  const std::size_t endAddress = tensor.end();
 
   shardedTensors.erase(it);
   tensor.deallocate();
@@ -114,12 +113,11 @@ bool ShardAllocationModel::deallocate(TensorMemoryEntry &tensor) {
 }
 
 bool ShardAllocationModel::reallocate(TensorMemoryEntry &tensor) {
-  if (!tensor.isAllocated() ||
-      !llvm::is_contained(shardedTensors, &tensor)) {
+  if (!tensor.isAllocated() || !llvm::is_contained(shardedTensors, &tensor)) {
     return false;
   }
 
-  const size_t oldAddress = tensor.getLogicalAddress();
+  const std::size_t oldAddress = tensor.getLogicalAddress();
   if (!deallocate(tensor) || !allocate(tensor)) {
     return false;
   }
@@ -130,8 +128,8 @@ bool ShardAllocationModel::reallocate(TensorMemoryEntry &tensor) {
   return true;
 }
 
-size_t ShardAllocationModel::getLowestAllocatedAddress() const {
-  size_t lowestAddress = totalL1Size;
+std::size_t ShardAllocationModel::getLowestAllocatedAddress() const {
+  std::size_t lowestAddress = totalL1Size;
 
   for (const TensorMemoryEntry *entry : shardedTensors) {
     if (entry && entry->isAllocated()) {
@@ -142,16 +140,14 @@ size_t ShardAllocationModel::getLowestAllocatedAddress() const {
   return lowestAddress;
 }
 
-size_t
-ShardAllocationModel::getHighestCBAddress(size_t peakCBMemorySize) const {
-  const size_t offset = static_cast<size_t>(totalL1Size * offsetCap);
+std::size_t
+ShardAllocationModel::getHighestCBAddress(std::size_t peakCBMemorySize) const {
+  const std::size_t offset = static_cast<std::size_t>(totalL1Size * offsetCap);
   return peakCBMemorySize + offset;
 }
 
-bool ShardAllocationModel::isAllocated(
-    const TensorMemoryEntry &tensor) const {
-  return tensor.isAllocated() &&
-         llvm::is_contained(shardedTensors, &tensor);
+bool ShardAllocationModel::isAllocated(const TensorMemoryEntry &tensor) const {
+  return tensor.isAllocated() && llvm::is_contained(shardedTensors, &tensor);
 }
 
 bool ShardAllocationModel::isSameState(
@@ -160,9 +156,12 @@ bool ShardAllocationModel::isSameState(
     return false;
   }
 
-  for (size_t i = 0; i < freeBlocks.size(); ++i) {
-    if (freeBlocks[i].startAddress != other.freeBlocks[i].startAddress ||
-        freeBlocks[i].endAddress != other.freeBlocks[i].endAddress) {
+  for (std::size_t blockIndex = 0; blockIndex < freeBlocks.size();
+       ++blockIndex) {
+    if (freeBlocks[blockIndex].startAddress !=
+            other.freeBlocks[blockIndex].startAddress ||
+        freeBlocks[blockIndex].endAddress !=
+            other.freeBlocks[blockIndex].endAddress) {
       return false;
     }
   }
@@ -195,9 +194,135 @@ ShardAllocationModel ShardAllocationModel::cloneWithNewEntries(
 // ReallocationAnalysis
 //===----------------------------------------------------------------------===//
 
-bool ReallocationAnalysis::applyOverrides() {
+bool ReallocationAnalysis::isOpSupportedForReallocate(Operation *op) const {
+  if (!op || !mlir::isa<TTNNDialect>(op->getDialect()) ||
+      !analysisInput.opConfigMap.contains(op)) {
+    return false;
+  }
+
+  if (!isDeviceBufferOp(op) || !mlir::dyn_cast<OpModel>(op)) {
+    return false;
+  }
+
+  // Keep the original limitation: do not model operations with explicit
+  // allocation effects as safe reallocation points.
+  if (auto memoryEffect = mlir::dyn_cast<MemoryEffectOpInterface>(op)) {
+    llvm::SmallVector<MemoryEffects::EffectInstance, 1> effects;
+    memoryEffect.getEffects(effects);
+    for (const auto &effect : effects) {
+      if (mlir::isa<MemoryEffects::Allocate>(effect.getEffect())) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+void ReallocationAnalysis::finishOp(Operation *op) { doneOps.insert(op); }
+
+TensorMemoryEntry &
+ReallocationAnalysis::getOrCreateTensorEntry(std::size_t bufferSize,
+                                             Value value) {
+  for (TensorMemoryEntry *entry : tensorCache) {
+    if (entry->equalsByValue(value)) {
+      return *entry;
+    }
+  }
+
+  auto *entry = new TensorMemoryEntry(bufferSize, value);
+  tensorCache.insert(entry);
+  return *entry;
+}
+
+bool ReallocationAnalysis::allocateOutputs(
+    ShardAllocationModel &model,
+    const llvm::SmallVector<TensorMemoryEntry *> &outputEntries) {
+  for (TensorMemoryEntry *entry : outputEntries) {
+    if (!entry || !entry->isL1Sharded()) {
+      continue;
+    }
+
+    if (!model.allocate(*entry)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool ReallocationAnalysis::deallocateInputs(
+    ShardAllocationModel &model,
+    const llvm::SmallVector<TensorMemoryEntry *> &inputEntries) {
+  bool success = true;
+
+  for (TensorMemoryEntry *entry : inputEntries) {
+    if (!entry || !entry->isL1Sharded() || !entry->getValue()) {
+      continue;
+    }
+
+    bool lifetimeEnded = true;
+    for (Operation *user : entry->getValue().getUsers()) {
+      if (!doneOps.contains(user)) {
+        lifetimeEnded = false;
+        break;
+      }
+    }
+
+    if (lifetimeEnded && model.isAllocated(*entry)) {
+      success &= model.deallocate(*entry);
+    }
+  }
+
+  return success;
+}
+
+bool ReallocationAnalysis::isNeededReallocation(
+    const ShardAllocationModel &allocator, std::size_t peakCBMemorySize,
+    std::size_t additionalUsage) const {
+  const std::size_t highestCBAddress =
+      allocator.getHighestCBAddress(peakCBMemorySize + additionalUsage);
+  return highestCBAddress >= allocator.getLowestAllocatedAddress();
+}
+
+bool ReallocationAnalysis::insertReallocate(
+    ShardAllocationModel &model, Operation *currentOp,
+    llvm::ArrayRef<TensorMemoryEntry *> outputEntries) {
+  for (TensorMemoryEntry *candidate : model.getShardedTensors()) {
+    if (!candidate || !model.isAllocated(*candidate) ||
+        llvm::is_contained(outputEntries, candidate)) {
+      continue;
+    }
+
+    Value value = candidate->getValue();
+    if (!value || !value.getDefiningOp()) {
+      continue;
+    }
+
+    // A tensor with no remaining use cannot contribute to future allocation
+    // pressure and does not need to be materialized through ReallocateOp.
+    const bool hasRemainingUse =
+        llvm::any_of(value.getUsers(),
+                     [&](Operation *user) { return !doneOps.contains(user); });
+    if (!hasRemainingUse) {
+      continue;
+    }
+
+    if (!model.reallocate(*candidate)) {
+      continue;
+    }
+
+    // Preserve exact SSA identity. The original PR converted this decision into
+    // Edge(producerOp, consumerOp, operandIdx), which loses result identity for
+    // multi-result producers.
+    analysisResult.memReallocateValuesMap[currentOp].insert(value);
+    return true;
+  }
+
   return false;
 }
+
+bool ReallocationAnalysis::applyOverrides() { return false; }
 
 void ReallocationAnalysis::analysisImplementation() {
   doneOps.clear();
@@ -221,33 +346,33 @@ void ReallocationAnalysis::analysisImplementation() {
       auto configIt = analysisInput.opConfigMap.find(currentOp);
       assert(configIt != analysisInput.opConfigMap.end());
 
-      const std::vector<TTNNLayoutAttr> inputLayouts =  
+      const std::vector<TTNNLayoutAttr> inputLayouts =
           utils::extractInputLayouts(currentOp);
 
       const op_constraint_validation::ValidationResult validation =
-          op_constraint_validation::validateOperation(
-              currentOp, inputLayouts, configIt->second);
+          op_constraint_validation::validateOperation(currentOp, inputLayouts,
+                                                      configIt->second);
 
       if (!validation.isSuccess()) {
         finishOp(currentOp);
         continue;
       }
 
-      const size_t cbPeakUsage = validation.cbPeakUsage;
-      const size_t outputTensorUsagePerCore = validation.outputL1Usage;
+      const std::size_t cbPeakUsage = validation.cbPeakUsage;
+      const std::size_t outputTensorUsagePerCore = validation.outputL1Usage;
 
       // The current BOS validation result exposes the backend tensor-buffer
       // peak separately from CB usage. Keep the same approximation used by the
       // original analysis for input tensors.
-      const size_t l1BuffersPeakUsage = validation.l1BuffersPeakUsage;
-      const size_t inputTensorUsagePerCore =
+      const std::size_t l1BuffersPeakUsage = validation.l1BuffersPeakUsage;
+      const std::size_t inputTensorUsagePerCore =
           l1BuffersPeakUsage > outputTensorUsagePerCore
               ? l1BuffersPeakUsage - outputTensorUsagePerCore
               : 0;
 
       llvm::SmallVector<TensorMemoryEntry *> inputEntries;
       llvm::SmallVector<TensorMemoryEntry *> outputEntries;
-      size_t additionalUsage = l1BuffersPeakUsage;
+      std::size_t additionalUsage = l1BuffersPeakUsage;
 
       for (Value outputValue : analysisInput.getOutputValues(currentOp)) {
         TensorMemoryEntry &entry =
@@ -257,8 +382,7 @@ void ReallocationAnalysis::analysisImplementation() {
         }
 
         outputEntries.push_back(&entry);
-        additionalUsage -=
-            std::min(additionalUsage, entry.getBufferSize());
+        additionalUsage -= std::min(additionalUsage, entry.getBufferSize());
       }
 
       for (Value inputValue : analysisInput.getInputValues(currentOp)) {
@@ -269,8 +393,7 @@ void ReallocationAnalysis::analysisImplementation() {
         }
 
         inputEntries.push_back(&entry);
-        additionalUsage -=
-            std::min(additionalUsage, entry.getBufferSize());
+        additionalUsage -= std::min(additionalUsage, entry.getBufferSize());
       }
 
       ShardAllocationModel workingModel = allocModel;
@@ -329,145 +452,15 @@ void ReallocationAnalysis::analysisImplementation() {
       }
 
       if (!allocateOutputs(allocModel, outputEntries)) {
-        TTMLIR_DEBUG(
-            ttmlir::LogComponent::ViterbiOptimizer,
-            "ReallocationAnalysis: output allocation failed for {}",
-            currentOp->getName().getStringRef());
+        TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+                     "ReallocationAnalysis: output allocation failed for {}",
+                     currentOp->getName().getStringRef());
       }
 
       deallocateInputs(allocModel, inputEntries);
       finishOp(currentOp);
     }
   });
-}
-
-bool ReallocationAnalysis::isOpSupportedForReallocate(Operation *op) const {
-  if (!op || !mlir::isa<TTNNDialect>(op->getDialect()) ||
-      !analysisInput.opConfigMap.contains(op)) {
-    return false;
-  }
-
-  if (!isDeviceBufferOp(op) || !mlir::dyn_cast<OpModel>(op)) {
-    return false;
-  }
-
-  // Keep the original limitation: do not model operations with explicit
-  // allocation effects as safe reallocation points.
-  if (auto memoryEffect = mlir::dyn_cast<MemoryEffectOpInterface>(op)) {
-    SmallVector<MemoryEffects::EffectInstance, 1> effects;
-    memoryEffect.getEffects(effects);
-    for (const auto &effect : effects) {
-      if (mlir::isa<MemoryEffects::Allocate>(effect.getEffect())) {
-        return false;
-      }
-    }
-  }
-
-  return true;
-}
-
-void ReallocationAnalysis::finishOp(Operation *op) {
-  doneOps.insert(op);
-}
-
-TensorMemoryEntry &
-ReallocationAnalysis::getOrCreateTensorEntry(size_t bufferSize, Value value) {
-  for (TensorMemoryEntry *entry : tensorCache) {
-    if (entry->equalsByValue(value)) {
-      return *entry;
-    }
-  }
-
-  auto *entry = new TensorMemoryEntry(bufferSize, value);
-  tensorCache.insert(entry);
-  return *entry;
-}
-
-bool ReallocationAnalysis::allocateOutputs(
-    ShardAllocationModel &model,
-    const llvm::SmallVector<TensorMemoryEntry *> &outputEntries) {
-  for (TensorMemoryEntry *entry : outputEntries) {
-    if (!entry || !entry->isL1Sharded()) {
-      continue;
-    }
-
-    if (!model.allocate(*entry)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-bool ReallocationAnalysis::deallocateInputs(
-    ShardAllocationModel &model,
-    const llvm::SmallVector<TensorMemoryEntry *> &inputEntries) {
-  bool success = true;
-
-  for (TensorMemoryEntry *entry : inputEntries) {
-    if (!entry || !entry->isL1Sharded() || !entry->getValue()) {
-      continue;
-    }
-
-    bool lifetimeEnded = true;
-    for (Operation *user : entry->getValue().getUsers()) {
-      if (!doneOps.contains(user)) {
-        lifetimeEnded = false;
-        break;
-      }
-    }
-
-    if (lifetimeEnded && model.isAllocated(*entry)) {
-      success &= model.deallocate(*entry);
-    }
-  }
-
-  return success;
-}
-
-bool ReallocationAnalysis::isNeededReallocation(
-    const ShardAllocationModel &allocator, size_t peakCBMemorySize,
-    size_t additionalUsage) const {
-  const size_t highestCBAddress =
-      allocator.getHighestCBAddress(peakCBMemorySize + additionalUsage);
-  return highestCBAddress >= allocator.getLowestAllocatedAddress();
-}
-
-bool ReallocationAnalysis::insertReallocate(
-    ShardAllocationModel &model, Operation *currentOp,
-    llvm::ArrayRef<TensorMemoryEntry *> outputEntries) {
-  for (TensorMemoryEntry *candidate : model.getShardedTensors()) {
-    if (!candidate || !model.isAllocated(*candidate) ||
-        llvm::is_contained(outputEntries, candidate)) {
-      continue;
-    }
-
-    Value value = candidate->getValue();
-    if (!value || !value.getDefiningOp()) {
-      continue;
-    }
-
-    // A tensor with no remaining use cannot contribute to future allocation
-    // pressure and does not need to be materialized through ReallocateOp.
-    const bool hasRemainingUse = llvm::any_of(
-        value.getUsers(),
-        [&](Operation *user) { return !doneOps.contains(user); });
-    if (!hasRemainingUse) {
-      continue;
-    }
-
-    if (!model.reallocate(*candidate)) {
-      continue;
-    }
-
-    // Preserve exact SSA identity. The original PR converted this decision into
-    // Edge(producerOp, consumerOp, operandIdx), which loses result identity for
-    // multi-result producers.
-    analysisResult.memReallocateValuesMap[currentOp].insert(value);
-    return true;
-  }
-
-  return false;
 }
 
 } // namespace mlir::tt::ttnn

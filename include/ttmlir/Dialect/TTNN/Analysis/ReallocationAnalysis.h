@@ -8,34 +8,28 @@
 #include "ttmlir/Dialect/TTNN/Analysis/OpConfig.h"
 #include "ttmlir/Dialect/TTNN/Analysis/TTNNAnalysis.h"
 #include "ttmlir/Dialect/TTNN/IR/TTNNOpsAttrs.h"
-#include "ttmlir/Dialect/TTNN/Utils/PassOverrides.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <cassert>
 #include <cstddef>
-#include <string>
 #include <utility>
 
 namespace mlir::tt::ttnn {
 
-//===----------------------------------------------------------------------===//
-// Reallocation analysis input / output
-//===----------------------------------------------------------------------===//
-
 struct ReallocationAnalysisInput {
   llvm::DenseMap<Operation *, OpConfig> opConfigMap;
   llvm::DenseMap<func::FuncOp, llvm::SmallVector<Operation *>> schedule;
-
   llvm::DenseMap<Operation *, llvm::DenseSet<Value>> inputValueMap;
   llvm::DenseMap<Operation *, llvm::DenseSet<Value>> outputValueMap;
-
-  uint64_t usableL1CacheSize = 0;
+  std::size_t usableL1CacheSize = 0;
   double offsetCap = 0.10;
 
   ReallocationAnalysisInput() = default;
@@ -43,163 +37,189 @@ struct ReallocationAnalysisInput {
   ReallocationAnalysisInput(
       llvm::DenseMap<Operation *, OpConfig> opConfigMap,
       llvm::DenseMap<func::FuncOp, llvm::SmallVector<Operation *>> schedule,
-      uint64_t usableL1CacheSize, double offsetCap)
+      std::size_t usableL1CacheSize, double offsetCap)
       : opConfigMap(std::move(opConfigMap)), schedule(std::move(schedule)),
         usableL1CacheSize(usableL1CacheSize), offsetCap(offsetCap) {
     for (const auto &[_, operations] : this->schedule) {
-      for (Operation *op : operations) {
-        extractInputValues(op);
-        extractOutputValues(op);
+      for (Operation *operation : operations) {
+        llvm::DenseSet<Value> inputValues;
+        llvm::DenseSet<Value> outputValues;
+
+        for (Value operand : operation->getOperands()) {
+          if (operand.getDefiningOp()) {
+            inputValues.insert(operand);
+          }
+        }
+
+        for (Value result : operation->getResults()) {
+          if (!result.use_empty()) {
+            outputValues.insert(result);
+          }
+        }
+
+        inputValueMap[operation] = std::move(inputValues);
+        outputValueMap[operation] = std::move(outputValues);
       }
     }
   }
 
-  llvm::DenseSet<Value> getInputValues(Operation *op) const {
-    auto it = inputValueMap.find(op);
-    return it == inputValueMap.end() ? llvm::DenseSet<Value>{} : it->second;
-  }
-
-  llvm::DenseSet<Value> getOutputValues(Operation *op) const {
-    auto it = outputValueMap.find(op);
-    return it == outputValueMap.end() ? llvm::DenseSet<Value>{} : it->second;
-  }
-
-  bool operator==(const ReallocationAnalysisInput &rhs) const {
-    return opConfigMap == rhs.opConfigMap && schedule == rhs.schedule &&
-           usableL1CacheSize == rhs.usableL1CacheSize &&
-           offsetCap == rhs.offsetCap;
-  }
-
-  bool operator!=(const ReallocationAnalysisInput &rhs) const {
-    return !(*this == rhs);
-  }
-
-private:
-  void extractInputValues(Operation *op) {
-    llvm::DenseSet<Value> values;
-    for (Value operand : op->getOperands()) {
-      if (mlir::isa<RankedTensorType>(operand.getType())) {
-        values.insert(operand);
-      }
+  llvm::DenseSet<Value> getInputValues(Operation *operation) const {
+    auto inputIt = inputValueMap.find(operation);
+    if (inputIt == inputValueMap.end()) {
+      return {};
     }
-    inputValueMap[op] = std::move(values);
+
+    return inputIt->second;
   }
 
-  void extractOutputValues(Operation *op) {
-    llvm::DenseSet<Value> values;
-    for (Value result : op->getResults()) {
-      if (mlir::isa<RankedTensorType>(result.getType())) {
-        values.insert(result);
-      }
+  llvm::DenseSet<Value> getOutputValues(Operation *operation) const {
+    auto outputIt = outputValueMap.find(operation);
+    if (outputIt == outputValueMap.end()) {
+      return {};
     }
-    outputValueMap[op] = std::move(values);
+
+    return outputIt->second;
+  }
+
+  bool operator==(const ReallocationAnalysisInput &other) const {
+    return opConfigMap == other.opConfigMap && schedule == other.schedule;
+  }
+
+  bool operator!=(const ReallocationAnalysisInput &other) const {
+    return !(*this == other);
   }
 };
 
-/// Exact SSA values that should be materialized through ttnn.reallocate.
-/// The map key is the operation whose allocation pressure triggered the
-/// decision; the values retain exact multi-result identity.
 struct ReallocationAnalysisResult {
   llvm::DenseMap<Operation *, llvm::DenseSet<Value>> memReallocateValuesMap;
 
-  bool operator==(const ReallocationAnalysisResult &rhs) const {
-    return memReallocateValuesMap == rhs.memReallocateValuesMap;
+  bool operator==(const ReallocationAnalysisResult &other) const {
+    return memReallocateValuesMap == other.memReallocateValuesMap;
   }
 
-  bool operator!=(const ReallocationAnalysisResult &rhs) const {
-    return !(*this == rhs);
+  bool operator!=(const ReallocationAnalysisResult &other) const {
+    return !(*this == other);
   }
 };
 
-inline llvm::raw_ostream &
-operator<<(llvm::raw_ostream &os, const ReallocationAnalysisResult &result) {
-  os << "ReallocationAnalysisResult {\n";
+inline llvm::raw_ostream &operator<<(llvm::raw_ostream &output,
+                                     const ReallocationAnalysisResult &result) {
+  output << "ReallocationAnalysisResult {\n";
+
   if (result.memReallocateValuesMap.empty()) {
-    os << "  <empty>\n";
+    output << "  <empty>\n";
   }
 
-  for (const auto &[triggerOp, values] : result.memReallocateValuesMap) {
-    os << "  Trigger: ";
-    if (triggerOp) {
-      triggerOp->print(os);
+  for (const auto &[insertBeforeOp, values] : result.memReallocateValuesMap) {
+    output << "  Insert before op: ";
+    if (insertBeforeOp) {
+      insertBeforeOp->print(output);
     } else {
-      os << "<null>";
+      output << "<null>";
     }
-    os << "\n";
+    output << "\n";
 
     for (Value value : values) {
-      os << "    - ";
-      value.printAsOperand(os, mlir::OpPrintingFlags{});
-      os << "\n";
+      output << "    - ";
+      value.printAsOperand(output, mlir::OpPrintingFlags{});
+      output << "\n";
     }
   }
 
-  os << "}";
-  return os;
+  output << "}";
+  return output;
 }
 
-//===----------------------------------------------------------------------===//
-// Tensor memory model
-//===----------------------------------------------------------------------===//
-
 struct FreeBlock {
-  size_t startAddress = 0;
-  size_t endAddress = 0;
+  std::size_t startAddress = 0;
+  std::size_t endAddress = 0;
 };
 
 class TensorMemoryEntry {
 public:
-  TensorMemoryEntry(size_t bufferSize, Value value)
+  TensorMemoryEntry(std::size_t bufferSize, Value value)
       : bufferSize(bufferSize), value(value) {}
 
-  bool isAllocated() const {
-    return logicalAddress != static_cast<size_t>(-1);
-  }
+  bool isAllocated() const { return logicalAddress != unallocatedAddress; }
 
-  void allocate(size_t address) {
+  void allocate(std::size_t address) {
     assert(!isAllocated());
     logicalAddress = address;
   }
 
   void deallocate() {
     assert(isAllocated());
-    logicalAddress = static_cast<size_t>(-1);
+    logicalAddress = unallocatedAddress;
   }
 
-  size_t getLogicalAddress() const { return logicalAddress; }
-  size_t start() const { return logicalAddress; }
-  size_t end() const { return logicalAddress + bufferSize; }
-  size_t getBufferSize() const { return bufferSize; }
+  std::size_t getLogicalAddress() const { return logicalAddress; }
+
+  std::size_t start() const { return logicalAddress; }
+
+  std::size_t end() const { return logicalAddress + bufferSize; }
+
+  std::size_t getBufferSize() const { return bufferSize; }
+
   Value getValue() const { return value; }
 
   bool isL1Sharded() const {
-    auto tensorType = mlir::dyn_cast_if_present<RankedTensorType>(
-        value ? value.getType() : Type());
+    if (!value) {
+      return false;
+    }
+
+    auto tensorType = dyn_cast<RankedTensorType>(value.getType());
     if (!tensorType) {
       return false;
     }
 
-    auto layout =
-        mlir::dyn_cast_or_null<TTNNLayoutAttr>(tensorType.getEncoding());
-    return layout && layout.hasShardedL1TensorMemoryLayout();
+    auto layout = dyn_cast_or_null<TTNNLayoutAttr>(tensorType.getEncoding());
+    return layout && isL1BufferType(layout.getBufferType()) &&
+           layout.hasShardedTensorMemoryLayout();
   }
 
-  bool equalsByValue(Value rhs) const { return value == rhs; }
+  bool isL1() const {
+    if (!value) {
+      return false;
+    }
+
+    auto tensorType = dyn_cast<RankedTensorType>(value.getType());
+    if (!tensorType) {
+      return false;
+    }
+
+    auto layout = dyn_cast_or_null<TTNNLayoutAttr>(tensorType.getEncoding());
+    return layout && isL1BufferType(layout.getBufferType()) &&
+           layout.getMemLayout();
+  }
+
+  bool equalsByValue(Value otherValue) const { return value == otherValue; }
+
+  bool operator==(const TensorMemoryEntry &other) const {
+    return logicalAddress == other.logicalAddress &&
+           bufferSize == other.bufferSize && value == other.value;
+  }
+
+  bool operator!=(const TensorMemoryEntry &other) const {
+    return !(*this == other);
+  }
 
 private:
-  size_t logicalAddress = static_cast<size_t>(-1);
-  size_t bufferSize = 0;
+  static constexpr std::size_t unallocatedAddress =
+      static_cast<std::size_t>(-1);
+
+  std::size_t logicalAddress = unallocatedAddress;
+  std::size_t bufferSize = 0;
   Value value;
 };
 
 class ShardAllocationModel {
 public:
-  explicit ShardAllocationModel(size_t totalL1Size)
+  explicit ShardAllocationModel(std::size_t totalL1Size)
       : totalL1Size(totalL1Size) {
     freeBlocks.push_back({0, totalL1Size});
   }
 
-  ShardAllocationModel(size_t totalL1Size, double offsetCap)
+  ShardAllocationModel(std::size_t totalL1Size, double offsetCap)
       : totalL1Size(totalL1Size), offsetCap(offsetCap) {
     freeBlocks.push_back({0, totalL1Size});
   }
@@ -208,8 +228,8 @@ public:
   bool deallocate(TensorMemoryEntry &tensor);
   bool reallocate(TensorMemoryEntry &tensor);
 
-  size_t getLowestAllocatedAddress() const;
-  size_t getHighestCBAddress(size_t peakCBMemorySize) const;
+  std::size_t getLowestAllocatedAddress() const;
+  std::size_t getHighestCBAddress(std::size_t peakCBMemorySize) const;
 
   bool isAllocated(const TensorMemoryEntry &tensor) const;
   bool isSameState(const ShardAllocationModel &other) const;
@@ -218,57 +238,46 @@ public:
       llvm::DenseMap<const TensorMemoryEntry *, TensorMemoryEntry *> &entryMap)
       const;
 
-  llvm::SmallVector<TensorMemoryEntry *, 16> getShardedTensors() const {
+  const llvm::SmallVector<TensorMemoryEntry *, 16> &getShardedTensors() const {
     return shardedTensors;
   }
 
 private:
-  size_t totalL1Size = 0;
+  std::size_t totalL1Size = 0;
   double offsetCap = 0.10;
   llvm::SmallVector<TensorMemoryEntry *, 16> shardedTensors;
   llvm::SmallVector<FreeBlock, 16> freeBlocks;
 };
 
-//===----------------------------------------------------------------------===//
-// Reallocation analysis
-//===----------------------------------------------------------------------===//
-
-class ReallocationAnalysis
-    : public TTNNAnalysis<ReallocationAnalysisInput,
-                          ReallocationAnalysisResult> {
+class ReallocationAnalysis : public TTNNAnalysis<ReallocationAnalysisInput,
+                                                 ReallocationAnalysisResult> {
 public:
-  explicit ReallocationAnalysis(Operation *op) : TTNNAnalysis(op) {}
-
-  ~ReallocationAnalysis() {
-    for (TensorMemoryEntry *entry : tensorCache) {
-      delete entry;
-    }
-  }
+  ReallocationAnalysis(Operation *op) : TTNNAnalysis(op) {}
 
 private:
-  void analysisImplementation() override;
-  bool applyOverrides() override;
-
   bool isOpSupportedForReallocate(Operation *op) const;
   void finishOp(Operation *op);
 
-  TensorMemoryEntry &getOrCreateTensorEntry(size_t bufferSize, Value value);
+  TensorMemoryEntry &getOrCreateTensorEntry(std::size_t bufferSize,
+                                            Value value);
 
-  bool allocateOutputs(
-      ShardAllocationModel &model,
-      const llvm::SmallVector<TensorMemoryEntry *> &outputEntries);
+  bool
+  allocateOutputs(ShardAllocationModel &model,
+                  const llvm::SmallVector<TensorMemoryEntry *> &outputEntries);
 
-  bool deallocateInputs(
-      ShardAllocationModel &model,
-      const llvm::SmallVector<TensorMemoryEntry *> &inputEntries);
+  bool
+  deallocateInputs(ShardAllocationModel &model,
+                   const llvm::SmallVector<TensorMemoryEntry *> &inputEntries);
 
   bool isNeededReallocation(const ShardAllocationModel &allocator,
-                            size_t peakCBMemorySize,
-                            size_t additionalUsage) const;
+                            std::size_t peakCBMemorySize,
+                            std::size_t additionalUsage) const;
 
-  bool insertReallocate(
-      ShardAllocationModel &model, Operation *currentOp,
-      llvm::ArrayRef<TensorMemoryEntry *> outputEntries);
+  bool insertReallocate(ShardAllocationModel &model, Operation *currentOp,
+                        llvm::ArrayRef<TensorMemoryEntry *> outputEntries);
+
+  bool applyOverrides() override;
+  void analysisImplementation() override;
 
   llvm::DenseSet<Operation *> doneOps;
   llvm::DenseSet<TensorMemoryEntry *> tensorCache;

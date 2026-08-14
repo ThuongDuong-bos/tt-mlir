@@ -5,21 +5,17 @@
 #ifndef TTMLIR_DIALECT_TTNN_TRANSFORMS_VITERBIOPTIMIZER_H
 #define TTMLIR_DIALECT_TTNN_TRANSFORMS_VITERBIOPTIMIZER_H
 
-#include "mlir/Pass/PassRegistry.h"
-
 #include "ttmlir/Dialect/TTNN/Utils/OptimizerOverrides.h"
 
-namespace tt::tt_metal::distributed {
-class MeshDevice;
-} // namespace tt::tt_metal::distributed
+#include "mlir/Pass/PassRegistry.h"
+
+#include <cstdint>
+#include <memory>
 
 namespace mlir::tt::ttnn {
 
 struct TTIRToTTNNCommonPipelineOptions;
 
-//===----------------------------------------------------------------------===//
-// ViterbiOptimizer
-//===----------------------------------------------------------------------===//
 struct ViterbiOptimizerOptions {
   llvm::StringMap<OutputLayoutOverrideParams> overrideOutputLayout;
   llvm::StringMap<Conv2dConfigOverrideParams> overrideConv2dConfig;
@@ -39,9 +35,6 @@ std::unique_ptr<::mlir::Pass> createViterbiOptimizer();
 std::unique_ptr<::mlir::Pass>
 createViterbiOptimizer(ViterbiOptimizerOptions options);
 
-//===----------------------------------------------------------------------===//
-// ViterbiOptimizer Registration
-//===----------------------------------------------------------------------===//
 inline void registerViterbiOptimizer() {
   ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
     return createViterbiOptimizer();
