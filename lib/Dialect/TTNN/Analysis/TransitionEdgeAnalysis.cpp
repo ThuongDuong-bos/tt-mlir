@@ -421,7 +421,7 @@ GetTransitionOpsResult TransitionEdgeAnalysis::getTransitionOps(
                              additionalL1Usage);
 
     if (!validationResult.isSuccess()) {
-      TTMLIR_DEBUG(
+      TTMLIR_TRACE(
           ttmlir::LogComponent::ViterbiOptimizer,
           "Transition validation failed: op={} status={} error={} "
           "inputLayout={} outputLayout={}",
@@ -501,7 +501,7 @@ GetTransitionOpsResult TransitionEdgeAnalysis::getTransitionOps(
             consumerOp, inputLayouts, configIt->second, additionalL1Usage);
 
     if (!consumerValidationResult.isSuccess()) {
-      TTMLIR_DEBUG(
+      TTMLIR_TRACE(
           ttmlir::LogComponent::ViterbiOptimizer,
           "Transition consumer validation failed: op={} status={} error={}",
           consumerOp->getName().getStringRef(),

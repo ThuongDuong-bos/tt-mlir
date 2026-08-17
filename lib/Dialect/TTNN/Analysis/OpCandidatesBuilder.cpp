@@ -383,7 +383,7 @@ static void printScheduleOrder(
     (void)func;
 
     for (std::size_t index = 0; index < operations.size(); ++index) {
-      TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer, "Op[{}]: {}", index,
+      TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer, "Op[{}]: {}", index,
                    operations[index]->getName().getStringRef());
     }
   }
@@ -458,7 +458,7 @@ OpCandidateBuilderResult OpCandidatesBuilder::buildCandidatesFromSchedule(
 
       auto opConfigIt = legalOpConfigs.find(op);
       if (opConfigIt == legalOpConfigs.end()) {
-        TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+        TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                      "No legal op configs for scheduled op {}",
                      op->getName().getStringRef());
         continue;

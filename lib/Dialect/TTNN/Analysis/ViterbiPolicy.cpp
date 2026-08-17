@@ -110,7 +110,7 @@ ViterbiPolicy::ViterbiPolicy(const OpCandidateBuilderResult &candidateResult,
 
 void ViterbiPolicy::reset() {
   TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
-               "Resetting ViterbiPolicy state\n");
+               "Resetting ViterbiPolicy state");
 
   viterbiTable.clear();
   backtrackTable.clear();
@@ -394,7 +394,7 @@ void ViterbiPolicy::printActivation(mlir::Operation *currentOp,
                                               activationInfo->value == value);
 
   if (shouldPrint) {
-    TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+    TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                  "  activation {0}: start={1} end={2} span={3} layout={4}",
                  optimizer_utils::formatValueShort(activationInfo->value),
                  activationInfo->lifetime.startOpIdx,
@@ -410,17 +410,17 @@ LiveTensorList
 ViterbiPolicy::getAllLiveActivations(mlir::Operation *currentOp) const {
   LiveTensorList liveActivations;
   if (!currentOp) {
-    TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+    TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                  "getAllLiveActivations: currentOp is null");
   } else {
     auto currentOpIdx =
         optimizer_utils::getScheduledOpIndex(schedule, currentOp);
     if (!currentOpIdx) {
-      TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+      TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                    "getAllLiveActivations: op {} is not in the schedule",
                    currentOp->getName().getStringRef());
     } else {
-      TTMLIR_DEBUG(
+      TTMLIR_TRACE(
           ttmlir::LogComponent::ViterbiOptimizer,
           "getAllLiveActivations: scanning live activations for op[{0}] {1}",
           *currentOpIdx, currentOp->getName().getStringRef());
@@ -447,7 +447,7 @@ ViterbiPolicy::getAllLiveActivations(mlir::Operation *currentOp) const {
         return lhs.value.getAsOpaquePointer() < rhs.value.getAsOpaquePointer();
       });
 
-      TTMLIR_DEBUG(
+      TTMLIR_TRACE(
           ttmlir::LogComponent::ViterbiOptimizer,
           "getAllLiveActivations: final ordered live activation count = {0}",
           liveActivations.size());
@@ -499,7 +499,7 @@ ViterbiPolicy::getOpParents(mlir::Operation *currentOp) const {
       }
     }
 
-    TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+    TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                  "getOpParents: op {} parentOps=[{}]",
                  currentOp->getName().getStringRef(),
                  optimizer_utils::parentOpsToString(parentOps));
@@ -617,7 +617,7 @@ ViterbiPolicy::getBacktrackingSeeds() const {
         for (mlir::Operation *user : result.getUsers()) {
           if (scheduledOps.contains(user)) {
             isScheduledSink = false;
-            TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+            TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                          "Skipping sink op {} as it has scheduled user {}",
                          sinkOp->getName().getStringRef(),
                          user->getName().getStringRef());
@@ -816,13 +816,13 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
       LiveTensorList passiveActivations = getPassiveActivations(op);
       passiveTensorProducers = getPassiveTensorProducers(passiveActivations);
 
-      TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+      TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                    "Op {} passive producers=[{}]", op->getName().getStringRef(),
                    optimizer_utils::parentOpsToString(passiveTensorProducers));
-      TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer, "Op {} isJoin={}",
+      TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer, "Op {} isJoin={}",
                    op->getName().getStringRef(), isJoin);
 
-      TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+      TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                    "Calculating {} costs for op {} with {} candidates",
                    isJoin ? "join" : "linear", op->getName().getStringRef(),
                    candidates.size());
@@ -861,7 +861,7 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
             auto parentDpIt = viterbiTable.find(parentOp);
             if (parentCandidatesIt == candidateResult.candidateMap.end() ||
                 parentDpIt == viterbiTable.end()) {
-              TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+              TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                            "DP op={} candidate={} -> inf: parent {} missing "
                            "{}{}",
                            op->getName().getStringRef(), candidateIndex,
@@ -902,7 +902,7 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
               if (parentCandidateCost < bestParentCost) {
                 bestParentCost = parentCandidateCost;
                 bestParentIdx = static_cast<int>(parentCandidateIndex);
-                TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+                TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                              "DP best edge op={} c={} parent={} pc={} "
                              "parentDp={} edge={} combined={}",
                              op->getName().getStringRef(), candidateIndex,
@@ -916,7 +916,7 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
             // Guard against no valid path from parent candidate to current
             // candidate
             if (!std::isfinite(bestParentCost)) {
-              TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+              TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                            "DP op={} candidate={} -> inf: no finite path from "
                            "parent {}",
                            op->getName().getStringRef(), candidateIndex,
@@ -940,7 +940,7 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
                       -1);
           }
         } else {
-          TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+          TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                        "DP op={} candidate={} -> inf: localCost=inf",
                        op->getName().getStringRef(), candidateIndex);
         }
@@ -949,7 +949,7 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
         // backtrackTable[u][i][p] = argmin_j(dp[p][j] + t(p_j -> u_i))
         viterbiTable[op][candidateIndex] = totalCost;
         backtrackTable[op][candidateIndex] = bestPrevIdxByParent;
-        TTMLIR_DEBUG(
+        TTMLIR_TRACE(
             ttmlir::LogComponent::ViterbiOptimizer,
             "DP op={} c={} local={} parentSum={} total={} btSize={}",
             op->getName().getStringRef(), candidateIndex, localResult.cost,
@@ -957,7 +957,7 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
             totalCost, bestPrevIdxByParent.size());
         for (std::size_t parentIdx = 0; parentIdx < bestPrevIdxByParent.size();
              ++parentIdx) {
-          TTMLIR_DEBUG(
+          TTMLIR_TRACE(
               ttmlir::LogComponent::ViterbiOptimizer,
               "DP backtrack op={} c={} parentIdx={} parentCandidate={}",
               op->getName().getStringRef(), candidateIndex, parentIdx,
@@ -985,7 +985,7 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
         while (candidateIndex < candidates.size() &&
                candidates[candidateIndex].groupIndex &&
                *candidates[candidateIndex].groupIndex == groupIndex) {
-          TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+          TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                        "DP op={} candidate={} -> inf: skipped by invalid "
                        "layout group {}",
                        op->getName().getStringRef(), candidateIndex,
@@ -1000,7 +1000,7 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
       // Sort cached output sizes only for deterministic debug logging.
       auto storeIt = candidateOutputSizes.find(op);
       if (storeIt == candidateOutputSizes.end()) {
-        TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+        TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                      "computeOutputSize store check: op={} no stored entry",
                      op->getName().getStringRef());
       } else {
@@ -1040,11 +1040,11 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
           rankedEntries[insertIdx] = currentEntry;
         }
 
-        TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+        TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                      "computeOutputSize store check: op={} storedCount={}",
                      op->getName().getStringRef(), rankedEntries.size());
         for ([[maybe_unused]] const RankedCacheEntry &entry : rankedEntries) {
-          TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer, "  c[{}] = {}",
+          TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer, "  c[{}] = {}",
                        entry.candidateIdx, entry.bytes);
         }
       }
@@ -1064,7 +1064,7 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
           }
         }
 
-        TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+        TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                      "DP normalized op={} opMinCost={}",
                      op->getName().getStringRef(), opMinCost);
       }
@@ -1084,7 +1084,7 @@ SolverStatus ViterbiPolicy::performCostCalculation() {
         status = SolverStatus::NoValidGlobalPath;
         stopCostCalculation = true;
       } else {
-        TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+        TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer,
                      "Finished cost calculation for op {} \n",
                      op->getName().getStringRef());
       }
@@ -1572,7 +1572,7 @@ SolverStatus ViterbiPolicy::validateFinalAssignment() const {
             return SolverStatus::InvalidTransitionState;
           }
 
-          TTMLIR_DEBUG(
+          TTMLIR_TRACE(
               ttmlir::LogComponent::ViterbiOptimizer,
               "ValidateFinalAssignment: accepted conflict-resolved parent op "
               "{} "
@@ -1795,7 +1795,7 @@ void ViterbiPolicy::printOptimalPath() const {
 
 ViterbiResult ViterbiPolicy::solve() {
   TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
-               "Executing Viterbi algorithm\n");
+               "Executing Viterbi algorithm");
 
   ViterbiResult result;
   const char *failedStage = nullptr;
@@ -1848,7 +1848,7 @@ ViterbiResult ViterbiPolicy::solve() {
 
     TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
                  "Viterbi solve completed. Status: {0}, Total cost: {1}, L1: "
-                 "{2}, DRAM: {3}\n",
+                 "{2}, DRAM: {3}",
                  getSolverStatusString(result.status), result.totalCost,
                  result.numL1Configs, result.numDRAMConfigs);
   }

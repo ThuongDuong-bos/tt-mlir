@@ -44,7 +44,7 @@ void OperationScheduler::analysisImplementation() {
             // Schedule the operation
             scheduler.scheduleOp(currentOp);
 
-            TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer, 
+            TTMLIR_TRACE(ttmlir::LogComponent::ViterbiOptimizer, 
                 "Scheduled op: {}", 
                 currentOp->getName().getStringRef());
         }

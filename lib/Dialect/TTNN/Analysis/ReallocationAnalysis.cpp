@@ -312,10 +312,10 @@ bool ReallocationAnalysis::insertReallocate(
       continue;
     }
 
-    // Preserve exact SSA identity. The original PR converted this decision into
-    // Edge(producerOp, consumerOp, operandIdx), which loses result identity for
-    // multi-result producers.
     analysisResult.memReallocateValuesMap[currentOp].insert(value);
+    TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+                 "ReallocationAnalysis: reallocated tensor before {}",
+                 currentOp->getName().getStringRef());
     return true;
   }
 
@@ -325,6 +325,9 @@ bool ReallocationAnalysis::insertReallocate(
 bool ReallocationAnalysis::applyOverrides() { return false; }
 
 void ReallocationAnalysis::analysisImplementation() {
+  TTMLIR_DEBUG(ttmlir::LogComponent::ViterbiOptimizer,
+               "ReallocationAnalysis: starting");
+
   doneOps.clear();
 
   op->walk([&](func::FuncOp func) {
