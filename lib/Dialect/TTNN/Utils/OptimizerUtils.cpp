@@ -8,13 +8,18 @@
 #include "ttmlir/Dialect/TTCore/IR/TTCoreOpsTypes.h"
 #include "ttmlir/Dialect/TTNN/Analysis/OpConfig.h"
 #include "ttmlir/Dialect/TTNN/IR/TTNNOpsAttrs.h"
+#include "ttmlir/Support/Logger.h"
 
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/MLIRContext.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "mlir/IR/Value.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
@@ -212,7 +217,6 @@ getUniqueOpSpecificAttrs(const std::vector<OpConfig> &configs) {
       attrVec.push_back(config.opSpecificAttrs);
     }
   }
-
   return attrVec;
 }
 
@@ -221,31 +225,35 @@ llvm::SmallVector<OpConfig> getUniqueTestConfigsForMatmulLinear(
   struct BufferMemLayoutKey {
     BufferType bufferType;
     TensorMemoryLayout memLayout;
-
     bool operator<(const BufferMemLayoutKey &other) const {
       if (bufferType != other.bufferType) {
         return bufferType < other.bufferType;
       }
-
       return memLayout < other.memLayout;
     }
   };
 
   // For each unique (bufferType, memLayout), collect:
-  //   - A representative partial layout with ignorePhysicalLayout=true.
-  //   - The unique opSpecificAttrs from configs with the same memLayout.
+  //   - A representative partial layout (with ignorePhysicalLayout=true)
+  //   - The unique opSpecificAttrs from configs with that same memLayout
   //
-  // MatmulProgramConfig depends on the tensor memory layout type. Pairing a
-  // program config generated for one memory layout with a different memory
-  // layout would produce an invalid configuration.
+  // MatmulProgramConfig depends on the tensor memory layout type
+  // (width_sharded uses mcast_in0=true, height_sharded uses mcast_in0=false,
+  // block_sharded uses a 2D config). Pairing a program config generated for
+  // one memLayout type with a different memLayout would produce invalid
+  // configs.
   struct LayoutGroup {
     TTNNLayoutAttr partialLayout;
     std::vector<OpConfig::OpSpecificAttrs> uniqueAttrs;
     llvm::DenseSet<OpConfig::OpSpecificAttrs> seenAttrs;
   };
 
-  // Keep iteration deterministic because downstream tie-breaks may select the
-  // first valid fallback configuration.
+  // Iteration order must be deterministic: downstream tie-breaks
+  // (e.g., L1-spill's first-fit walk over fallback configs) commit to
+  // the first entry, so a shuffled order produces different IR across
+  // processes. std::unordered_map iteration depends on bucket layout
+  // and varies between processes; std::map iterates in key order
+  // (bufferType, then memLayout).
   std::map<BufferMemLayoutKey, LayoutGroup> groups;
 
   for (const OpConfig &config : consumerConfigs) {
@@ -256,22 +264,19 @@ llvm::SmallVector<OpConfig> getUniqueTestConfigsForMatmulLinear(
                            config.outputLayout.getMemLayout().getValue()};
 
     LayoutGroup &group = groups[key];
-
     if (!group.partialLayout) {
       TTNNLayoutAttr layout = config.outputLayout;
       group.partialLayout = layout.withIgnorePhysicalLayout(true);
     }
-
     if (group.seenAttrs.insert(config.opSpecificAttrs).second) {
       group.uniqueAttrs.push_back(config.opSpecificAttrs);
     }
   }
 
+  // Build test configs: each partial layout is paired only with
+  // opSpecificAttrs from configs of the same (bufferType, memLayout) group.
   llvm::SmallVector<OpConfig> testConfigs;
-
   for (const auto &[layoutKey, group] : groups) {
-    (void)layoutKey;
-
     for (const OpConfig::OpSpecificAttrs &attrs : group.uniqueAttrs) {
       testConfigs.push_back(OpConfig(group.partialLayout, attrs));
     }
@@ -287,13 +292,11 @@ getUniqueTestConfigs(const std::vector<OpConfig> &consumerConfigs,
     return getUniqueTestConfigsForMatmulLinear(consumerConfigs);
   }
 
-  // For non-Matmul/Linear ops, only op-specific attrs matter. No output layout
-  // is needed.
+  // For non-Matmul/Linear: only op-specific attrs matter, no output layout
+  // needed.
   std::vector<OpConfig::OpSpecificAttrs> uniqueAttrs =
       getUniqueOpSpecificAttrs(consumerConfigs);
-
   llvm::SmallVector<OpConfig> testConfigs;
-
   for (const OpConfig::OpSpecificAttrs &attrs : uniqueAttrs) {
     testConfigs.push_back(OpConfig(/*outputLayout=*/nullptr, attrs));
   }

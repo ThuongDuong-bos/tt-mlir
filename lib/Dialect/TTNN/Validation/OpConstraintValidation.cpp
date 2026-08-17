@@ -36,7 +36,6 @@ llvm::StringRef validationStatusToString(ValidationStatus status) {
   case ValidationStatus::OutOfMemoryError:
     return "OutOfMemoryError";
   }
-
   return "Unknown";
 }
 
@@ -72,16 +71,15 @@ validateWithMultipleAttributes(Operation *op,
 
     // TODO(bmalesevic, #7108): propagate all output layouts once multi-output
     // matching is supported.
-    const TTNNLayoutAttr firstActualOutputLayout =
+    const auto firstActualOutputLayout =
         constraintResult.checkAndGetFirstActualOutputLayout();
 
+    // 2. Search referenceConfigs for matching (outputLayout + opSpecificAttr).    
     if (!referenceConfigs.empty()) {
       bool foundMatch = false;
-
       for (size_t i = 0; i < referenceConfigs.size(); ++i) {
         if (referenceConfigs[i].outputLayout == firstActualOutputLayout &&
-            referenceConfigs[i].opSpecificAttrs ==
-                testConfig.opSpecificAttrs) {
+            referenceConfigs[i].opSpecificAttrs == testConfig.opSpecificAttrs) {
           results.push_back(ValidationResult::success(
               i, constraintResult.actualOutputLayouts,
               constraintResult.outputL1Usage, constraintResult.cbPeakUsage,
@@ -117,7 +115,6 @@ checkConstraintsResult(Operation *contextOp,
                        uint64_t additionalL1Usage) {
   if (!constraints) {
     ValidationResult result;
-
     llvm::handleAllErrors(
         constraints.takeError(),
         [&](ttnn::detail::OpNotSupportedError &notSupportedErr) {
@@ -125,33 +122,29 @@ checkConstraintsResult(Operation *contextOp,
         },
         [&](llvm::ErrorInfoBase &otherErr) {
           std::string errorMsg = otherErr.message();
-
           TTMLIR_DEBUG(ttmlir::LogComponent::OpValidation,
                        "OpModel constraints failed: {}",
                        ttmlir::utils::firstNLines(errorMsg, 8));
-
           result = ValidationResult::metalBackendError(
               ttmlir::utils::firstNLines(errorMsg, 8));
         });
-
     return result;
   }
 
   auto [cbPeakUsage, l1BuffersPeakUsage, overallPeakL1Usage,
         outputTensorUsagePerCore, outputLayouts] = constraints.get();
 
-  const uint64_t effectiveL1Limit = utils::getUsableL1PerCore(contextOp);
-  const uint64_t totalL1Usage = overallPeakL1Usage + additionalL1Usage;
+  uint64_t effectiveL1Limit = utils::getUsableL1PerCore(contextOp);
+  uint64_t totalL1Usage = overallPeakL1Usage + additionalL1Usage;
 
   if (totalL1Usage > effectiveL1Limit) {
     TTMLIR_DEBUG(
         ttmlir::LogComponent::OpValidation,
         "Not enough L1 memory. "
-        "totalL1Usage: {} [overallPeakL1Usage={}, additionalL1Usage={}] "
-        "[cbPeakUsage={}, l1BuffersPeakUsage={}] limit: {}",
+        "totalL1Usage: {} [overallPeakL1Usage={}, additionalL1Usage={}]"
+        " [cbPeakUsage={}, l1BuffersPeakUsage={}] limit: {}",
         totalL1Usage, overallPeakL1Usage, additionalL1Usage, cbPeakUsage,
         l1BuffersPeakUsage, effectiveL1Limit);
-
     return ValidationResult::outOfMemoryError("Not enough L1 memory");
   }
 
@@ -173,11 +166,16 @@ checkConstraintsResult(Operation *contextOp,
 static ValidationResult
 validateConstraints(Operation *op, llvm::ArrayRef<TTNNLayoutAttr> inputLayouts,
                     const OpConfig &config, uint64_t additionalL1Usage) {
+
+  // Check that operation supports OpModel interface.
   auto backend = mlir::dyn_cast<OpModel>(op);
 
   if (!backend) {
-    // Ops marked with OpModelExempt deliberately do not implement OpModel.
-    // Return NotImplemented so optimizer callers can fall back gracefully.
+    // Ops marked with the OpModelExempt trait deliberately do not implement
+    // the OpModel interface (e.g. CCL/multi-device, trace, generic, or other
+    // ops without a metal-side definition). The optimizer relies on observing
+    // a NotImplemented result for such ops so it can fall back gracefully
+    // (e.g. evict L1 state) instead of treating the op as analyzable.
     if (op->hasTrait<OpModelExempt>()) {
       return ValidationResult::notImplemented(
           (llvm::Twine("OpModel interface not implemented for op ") +
@@ -185,13 +183,13 @@ validateConstraints(Operation *op, llvm::ArrayRef<TTNNLayoutAttr> inputLayouts,
               .str());
     }
 
-    llvm::reportFatalInternalError(
-        llvm::Twine("Backend constraints are not implemented for op ")
-            .concat(op->getName().getStringRef()));
+    llvm::reportFatalInternalError(llvm::Twine("Backend constraints are not "
+                                               "implemented for op ")
+                                       .concat(op->getName().getStringRef()));
   }
 
+  // Constraints are implemented for this op.
   auto deviceAttr = ttcore::lookupDevice(op);
-
   if (!deviceAttr) {
     llvm::reportFatalInternalError(
         llvm::Twine("No device attribute found for operation ")
@@ -201,17 +199,14 @@ validateConstraints(Operation *op, llvm::ArrayRef<TTNNLayoutAttr> inputLayouts,
   TTMLIR_DEBUG(ttmlir::LogComponent::OpValidation,
                "About to call getOpConstraints for {} with {} input layouts, "
                "additionalL1={}",
-               ttmlir::opToString(op), inputLayouts.size(),
-               additionalL1Usage);
+               ttmlir::opToString(op), inputLayouts.size(), additionalL1Usage);
 
   for (size_t i = 0; i < inputLayouts.size(); ++i) {
     TTMLIR_DEBUG(ttmlir::LogComponent::OpValidation,
                  "Input layout {}: {}, getLayout()={}, dtype={}", i,
-                 inputLayouts[i],
-                 static_cast<int>(inputLayouts[i].getLayout()),
+                  inputLayouts[i], static_cast<int>(inputLayouts[i].getLayout()),
                  static_cast<int>(inputLayouts[i].getDataType()));
   }
-
   TTMLIR_DEBUG(ttmlir::LogComponent::OpValidation, "Output config {}", config);
 
   llvm::Expected<ttnn::op_model::OpConstraints> l1UsageExp =
@@ -221,5 +216,5 @@ validateConstraints(Operation *op, llvm::ArrayRef<TTNNLayoutAttr> inputLayouts,
 }
 
 } // namespace op_constraint_validation
-
 } // namespace mlir::tt::ttnn
+
